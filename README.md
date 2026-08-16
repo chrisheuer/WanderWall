@@ -51,7 +51,8 @@ as a same-device fallback.
 ## Checks
 
 ```sh
-npm run check     # typecheck + layout geometry + ingest privacy
+npm run check                          # typecheck + layout + ingest + SSRF
+DATABASE_URL=... npm run check:db      # schema constraints, against a scratch DB
 ```
 
 - `scripts/check-layout.ts` asserts across 768 archetype/density/count/hero
@@ -66,6 +67,10 @@ npm run check     # typecheck + layout geometry + ingest privacy
   metadata and loopback, obfuscated IP literals, IPv4-mapped IPv6,
   non-image content, and oversized streaming bodies must all be refused,
   while genuine public hosts are allowed.
+- `scripts/check-db.ts` (needs a scratch `DATABASE_URL`) exercises the
+  SQL that only fails at runtime: the rate limiter's conditional upsert
+  and window reset, the partial unique indexes that dedup imports and
+  refuse a second creation charge, and the notification dedup claim.
 
 ## Architecture notes
 
