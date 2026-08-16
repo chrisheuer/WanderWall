@@ -37,18 +37,7 @@ export function ArtworkMesh({
   const outerW = width * (1 + matte * 2) + frame.barWidth * 2;
   const outerH = height * (1 + matte * 2) + frame.barWidth * 2;
 
-  const bars = useMemo(() => {
-    if (frame.barWidth === 0) return [];
-    const bw = frame.barWidth;
-    return [
-      // top, bottom, left, right
-      { pos: [0, outerH / 2 - bw / 2, 0] as const, size: [outerW, bw, frame.depth] as const },
-      { pos: [0, -outerH / 2 + bw / 2, 0] as const, size: [outerW, bw, frame.depth] as const },
-      { pos: [-outerW / 2 + bw / 2, 0, 0] as const, size: [bw, outerH - bw * 2, frame.depth] as const },
-      { pos: [outerW / 2 - bw / 2, 0, 0] as const, size: [bw, outerH - bw * 2, frame.depth] as const },
-    ];
-  }, [frame.barWidth, frame.depth, outerW, outerH]);
-
+  // Frame bars are drawn by <InstancedFrames> (one draw call per style).
   return (
     <group
       position={placed.position}
@@ -58,18 +47,6 @@ export function ArtworkMesh({
         focusArtwork(placed.artwork.id);
       }}
     >
-      {/* Frame bars */}
-      {bars.map((bar, i) => (
-        <mesh key={i} position={[bar.pos[0], bar.pos[1], bar.pos[2] + frame.depth / 2]}>
-          <boxGeometry args={[bar.size[0], bar.size[1], bar.size[2]]} />
-          <meshStandardMaterial
-            color={frame.color}
-            metalness={frame.metalness}
-            roughness={frame.roughness}
-          />
-        </mesh>
-      ))}
-
       {/* Matte board */}
       {matte > 0 ? (
         <mesh position={[0, 0, frame.depth * 0.35]}>

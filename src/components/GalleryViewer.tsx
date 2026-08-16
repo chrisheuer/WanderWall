@@ -6,6 +6,7 @@ import type { ArtworkView } from "@/lib/galleries";
 import type { GalleryLayout, PlacedArtwork } from "@/lib/layout";
 import { ArtworkGrid } from "@/components/ArtworkGrid";
 import { ArtworkMesh } from "./scene/ArtworkMesh";
+import { InstancedFrames } from "./scene/InstancedFrames";
 import { InfoPanel } from "./scene/InfoPanel";
 import { Joystick } from "./scene/Joystick";
 import { Lighting } from "./scene/Lighting";
@@ -98,7 +99,7 @@ export function GalleryViewer({
 
   if (mode === "list") {
     return (
-      <div>
+      <div style={{ position: "relative", zIndex: 1, background: "var(--bg)" }}>
         <div style={{ display: "flex", justifyContent: "flex-end", padding: "8px 0" }}>
           {webglOk ? (
             <button className="btn btn-secondary" onClick={() => setMode("walk")}>
@@ -118,6 +119,7 @@ export function GalleryViewer({
     <div
       style={{
         position: "relative",
+        zIndex: 1,
         width: "100%",
         height: "min(78vh, 860px)",
         background: activeRoom?.archetype.outdoor ? "#0d1420" : "#e8e6e0",
@@ -130,7 +132,7 @@ export function GalleryViewer({
         // WebGL2 via three defaults; renderer choices deliberately leave
         // room for @react-three/xr later.
         camera={{ fov: 68, near: 0.1, far: 120 }}
-        dpr={[1, 2]}
+        dpr={isTouch ? [1, 1.5] : [1, 2]}
         gl={{ antialias: true, powerPreference: "high-performance" }}
         shadows={false}
       >
@@ -138,6 +140,7 @@ export function GalleryViewer({
         {layout.rooms.map((room) => (
           <RoomMesh key={room.index} room={room} />
         ))}
+        <InstancedFrames layout={layout} />
         {layout.rooms.map((room) =>
           room.artworks.map((placed) => (
             <ArtworkMesh

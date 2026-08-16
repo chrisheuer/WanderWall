@@ -5,7 +5,7 @@ import { galleryBySlug } from "@/lib/galleries";
 import { loadGalleryWorld } from "@/lib/layout-server";
 import { LICENSES, type License } from "@/lib/licenses";
 import { env } from "@/lib/env";
-import { GalleryViewer } from "@/components/GalleryViewer";
+import { GalleryViewerLazy } from "@/components/GalleryViewerLazy";
 import { DonateButton } from "@/components/DonateButton";
 import { VisitPing } from "@/components/VisitPing";
 
@@ -91,14 +91,15 @@ export default async function PublicGalleryPage(props: Props) {
         ) : null}
       </header>
 
-      <GalleryViewer
+      <GalleryViewerLazy
         layout={layout}
         artworks={artworks}
         creatorName={creatorName}
         initialFocusId={deepLink ?? null}
+        posterUrl={artworks[0]?.urls.wall ?? null}
       >
         <DonateButton gallerySlug={gallery.slug} galleryTitle={gallery.title} />
-      </GalleryViewer>
+      </GalleryViewerLazy>
 
       {isPublic ? <VisitPing gallerySlug={gallery.slug} /> : null}
     </main>
