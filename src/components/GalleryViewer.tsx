@@ -25,13 +25,11 @@ import type { Residency } from "./scene/textures";
  */
 export function GalleryViewer({
   layout,
-  artworks,
   creatorName,
   initialFocusId,
   children,
 }: {
   layout: GalleryLayout;
-  artworks: ArtworkView[];
   creatorName: string;
   /** Deep link ?a=[id] — teleports the camera to that artwork. */
   initialFocusId?: string | null;
@@ -69,6 +67,17 @@ export function GalleryViewer({
     }
     return map;
   }, [layout]);
+
+  // Derived from the layout rather than passed alongside it: every artwork
+  // is already embedded in its placement, so sending the list separately
+  // would ship the whole collection twice in the RSC payload.
+  const artworks = useMemo<ArtworkView[]>(
+    () =>
+      layout.rooms
+        .flatMap((room) => room.artworks.map((placed) => placed.artwork))
+        .sort((a, b) => a.sortOrder - b.sortOrder),
+    [layout],
+  );
 
   // Deep link: focus (and thereby teleport to) the linked artwork.
   useEffect(() => {

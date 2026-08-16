@@ -93,7 +93,6 @@ export default async function PublicGalleryPage(props: Props) {
 
       <GalleryViewerLazy
         layout={layout}
-        artworks={artworks}
         creatorName={creatorName}
         initialFocusId={deepLink ?? null}
         // Thumb, not wall: the poster exists to paint something fast
