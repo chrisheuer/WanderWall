@@ -4,19 +4,25 @@ import { useEffect, useState } from "react";
 import * as THREE from "three";
 
 /**
- * Proximity texture streaming with an LRU cache and a byte budget.
+ * Texture residency with an LRU byte budget.
+ *
  * Residency policy (the performance contract):
  *   - focused artwork → zoom (2048)
  *   - active room     → wall (1024)
  *   - adjacent rooms  → thumb (256) pre-warm
- *   - elsewhere       → thumb, evictable
- * ~256MB budget on mobile, more on desktop.
+ *   - elsewhere       → not mounted at all (see GalleryViewer)
+ *
+ * Entries are reference-counted: a texture belonging to a currently
+ * mounted artwork is pinned and can never be evicted, so eviction cannot
+ * pull the picture you are standing in front of. Everything unpinned is
+ * evictable oldest-first once the budget is exceeded.
  */
 
 interface CacheEntry {
   texture: THREE.Texture;
   bytes: number;
   lastUsed: number;
+  refs: number;
 }
 
 const isMobile =
@@ -30,14 +36,25 @@ class TextureCache {
   private loader = new THREE.TextureLoader();
   private totalBytes = 0;
 
-  async load(url: string): Promise<THREE.Texture> {
+  /** Load and pin. Every acquire must be paired with a release. */
+  async acquire(url: string): Promise<THREE.Texture> {
     const hit = this.entries.get(url);
     if (hit) {
+      hit.refs += 1;
       hit.lastUsed = performance.now();
       return hit.texture;
     }
+
     const inflight = this.loading.get(url);
-    if (inflight) return inflight;
+    if (inflight) {
+      const texture = await inflight;
+      const entry = this.entries.get(url);
+      if (entry) {
+        entry.refs += 1;
+        entry.lastUsed = performance.now();
+      }
+      return texture;
+    }
 
     const promise = new Promise<THREE.Texture>((resolve, reject) => {
       this.loader.load(
@@ -49,7 +66,7 @@ class TextureCache {
           const img = texture.image as { width?: number; height?: number } | undefined;
           // RGBA + ~1/3 mipmap overhead.
           const bytes = Math.round((img?.width ?? 1024) * (img?.height ?? 1024) * 4 * 1.34);
-          this.entries.set(url, { texture, bytes, lastUsed: performance.now() });
+          this.entries.set(url, { texture, bytes, lastUsed: performance.now(), refs: 1 });
           this.totalBytes += bytes;
           this.loading.delete(url);
           this.evictIfNeeded();
@@ -66,28 +83,40 @@ class TextureCache {
     return promise;
   }
 
-  touch(url: string): void {
+  release(url: string): void {
     const entry = this.entries.get(url);
-    if (entry) entry.lastUsed = performance.now();
+    if (!entry) return;
+    entry.refs = Math.max(0, entry.refs - 1);
+    entry.lastUsed = performance.now();
+    // Unpinned entries stay cached until the budget forces them out, so
+    // stepping back into a room you just left is instant.
+    this.evictIfNeeded();
   }
 
   private evictIfNeeded(): void {
     if (this.totalBytes <= BUDGET_BYTES) return;
-    const byAge = [...this.entries.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
-    for (const [url, entry] of byAge) {
+    const evictable = [...this.entries.entries()]
+      .filter(([, e]) => e.refs === 0)
+      .sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    for (const [url, entry] of evictable) {
       if (this.totalBytes <= BUDGET_BYTES * 0.85) break;
-      // Never evict something touched this frame.
-      if (performance.now() - entry.lastUsed < 100) continue;
       entry.texture.dispose();
       this.entries.delete(url);
       this.totalBytes -= entry.bytes;
     }
   }
+
+  /** Test/diagnostic hook. */
+  stats(): { bytes: number; count: number; pinned: number } {
+    let pinned = 0;
+    for (const entry of this.entries.values()) if (entry.refs > 0) pinned += 1;
+    return { bytes: this.totalBytes, count: this.entries.size, pinned };
+  }
 }
 
 export const textureCache = new TextureCache();
 
-export type Residency = "focused" | "active" | "adjacent" | "far";
+export type Residency = "focused" | "active" | "adjacent";
 
 export function urlForResidency(
   urls: { thumb: string | null; wall: string | null; zoom: string | null },
@@ -104,8 +133,9 @@ export function urlForResidency(
 }
 
 /**
- * Progressive hook: returns the best already-loaded texture immediately and
- * upgrades when the target resolution arrives.
+ * Returns the best already-loaded texture and upgrades when the target
+ * resolution arrives. Holds a pin for as long as the component is mounted
+ * at that resolution.
  */
 export function useArtworkTexture(
   urls: { thumb: string | null; wall: string | null; zoom: string | null },
@@ -115,28 +145,29 @@ export function useArtworkTexture(
   const target = urlForResidency(urls, residency);
 
   useEffect(() => {
-    let alive = true;
     if (!target) return;
-    // Kick a fast thumb first if we have nothing shown yet.
-    if (!texture && urls.thumb && target !== urls.thumb) {
-      void textureCache.load(urls.thumb).then((t) => {
-        if (alive) setTexture((prev) => prev ?? t);
-      });
-    }
-    void textureCache
-      .load(target)
+    let alive = true;
+    let acquired: string | null = null;
+
+    textureCache
+      .acquire(target)
       .then((t) => {
-        if (alive) setTexture(t);
+        if (!alive) {
+          textureCache.release(target);
+          return;
+        }
+        acquired = target;
+        setTexture(t);
       })
       .catch(() => {
-        // Broken derivative: leave whatever we had.
+        // Broken derivative: keep whatever was already shown.
       });
+
     return () => {
       alive = false;
+      if (acquired) textureCache.release(acquired);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
 
-  if (texture) textureCache.touch((texture as THREE.Texture & { source?: { data?: { src?: string } } }).source?.data?.src ?? "");
   return texture;
 }

@@ -1,8 +1,8 @@
-import { createHmac } from "node:crypto";
 import { NextResponse } from "next/server";
 import { currentCreator } from "@/lib/auth";
 import { exchangeCode, saveToken, type Provider } from "@/lib/cloud-imports";
 import { env } from "@/lib/env";
+import { verifyState } from "@/lib/signed-state";
 
 /** OAuth callback: verify state, store tokens, return to the gallery. */
 export async function GET(request: Request, ctx: { params: Promise<{ provider: string }> }) {
@@ -16,15 +16,11 @@ export async function GET(request: Request, ctx: { params: Promise<{ provider: s
 
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state") ?? "";
-  const [creatorId, galleryId, sig] = state.split(":");
-  const expected = createHmac("sha256", env().CRON_SECRET)
-    .update(`${creatorId}:${galleryId}`)
-    .digest("hex")
-    .slice(0, 24);
-  if (!code || creatorId !== creator.id || sig !== expected) {
-    return NextResponse.json({ error: "invalid oauth state" }, { status: 400 });
+  const parsed = verifyState(url.searchParams.get("state") ?? "");
+  if (!code || !parsed || parsed.creatorId !== creator.id) {
+    return NextResponse.json({ error: "invalid or expired oauth state" }, { status: 400 });
   }
+  const galleryId = parsed.galleryId;
 
   const token = await exchangeCode(provider as Provider, code);
   await saveToken(creator.id, provider as Provider, token);

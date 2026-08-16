@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import * as THREE from "three";
-import type { GalleryLayout, PlacedArtwork } from "@/lib/layout";
+import type { LayoutRoom, PlacedArtwork } from "@/lib/layout";
 import { FRAME_STYLES, type FrameStyleDef } from "@/lib/frames";
 
 /**
@@ -44,10 +44,10 @@ function barsFor(placed: PlacedArtwork, frame: FrameStyleDef): BarInstance[] {
   }));
 }
 
-export function InstancedFrames({ layout }: { layout: GalleryLayout }) {
+export function InstancedFrames({ rooms }: { rooms: LayoutRoom[] }) {
   const groups = useMemo(() => {
     const byStyle = new Map<string, BarInstance[]>();
-    for (const room of layout.rooms) {
+    for (const room of rooms) {
       for (const placed of room.artworks) {
         const styleId = placed.artwork.frameStyle;
         const frame = FRAME_STYLES[styleId] ?? FRAME_STYLES["thin-black-metal"];
@@ -58,7 +58,7 @@ export function InstancedFrames({ layout }: { layout: GalleryLayout }) {
       }
     }
     return [...byStyle.entries()];
-  }, [layout]);
+  }, [rooms]);
 
   return (
     <>
@@ -88,6 +88,16 @@ function FrameStyleInstances({ style, bars }: { style: FrameStyleDef; bars: BarI
     instanced.instanceMatrix.needsUpdate = true;
     return instanced;
   }, [style, bars]);
+
+  // These are hand-built objects, so R3F will not dispose them for us —
+  // without this, every room change orphans a geometry and a material.
+  useEffect(() => {
+    return () => {
+      mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+      mesh.dispose();
+    };
+  }, [mesh]);
 
   return <primitive object={mesh} />;
 }

@@ -101,6 +101,13 @@ export function PlayerControls({
     // Teleport requests win.
     if (state.teleportTo) {
       camera.position.set(state.teleportTo[0], EYE_HEIGHT, state.teleportTo[1]);
+      // Sync the active room immediately: residency, the lighting rig, and
+      // the chapter label all key off it, and without this they stay on
+      // the previous room until the visitor happens to take a step.
+      const landed = roomAtPoint(layout, state.teleportTo[0], state.teleportTo[1]);
+      if (landed && landed.index !== state.activeRoomIndex) {
+        state.setActiveRoom(landed.index);
+      }
       state.clearTeleport();
     }
 

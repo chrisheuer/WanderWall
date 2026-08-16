@@ -340,13 +340,98 @@ function wallRuns(room: LayoutRoom): WallRun[] {
   return runs;
 }
 
-function artworkSize(a: ArtworkView, hero: boolean): { w: number; h: number } {
+/** Smallest gap between neighbouring canvases. */
+const MIN_GAP = 0.18;
+/** Below this a piece is too small to read; add a row instead of shrinking. */
+const COMFORTABLE_WIDTH = 0.75;
+
+function artworkSize(
+  a: ArtworkView,
+  hero: boolean,
+  maxWidth = Infinity,
+  maxHeight = Infinity,
+): { w: number; h: number } {
   const aspect = a.widthPx && a.heightPx ? a.widthPx / a.heightPx : 4 / 3;
   const longest = hero ? 2.2 : 1.15;
-  if (aspect >= 1) {
-    return { w: longest, h: longest / aspect };
+  const baseW = aspect >= 1 ? longest : longest * aspect;
+  const baseH = aspect >= 1 ? longest / aspect : longest;
+  // Shrink to fit the slot it was given. Never enlarge, and never exceed
+  // the budget — a piece wider than its slot is a piece overlapping its
+  // neighbour.
+  const scale = Math.min(1, maxWidth / baseW, maxHeight / baseH);
+  return { w: baseW * scale, h: baseH * scale };
+}
+
+interface FreeSpan {
+  start: number;
+  end: number;
+}
+
+/**
+ * The stretches of a wall that can actually hold art: the run minus corner
+ * margins and minus every door span. Carving doors out up front is what
+ * lets slots be evenly spaced — the previous approach nudged a piece off
+ * a door and straight into its neighbour.
+ */
+function freeSpans(run: WallRun, relaxed = false): FreeSpan[] {
+  const margin = relaxed ? 0.35 : WALL_MARGIN;
+  const doorPad = relaxed ? 0.15 : 0.4;
+  const minSpan = relaxed ? 0.3 : 0.5;
+  const half = run.length / 2;
+  let spans: FreeSpan[] = [{ start: -half + margin, end: half - margin }];
+  for (const door of run.doors) {
+    const blockStart = door.offset - door.width / 2 - doorPad;
+    const blockEnd = door.offset + door.width / 2 + doorPad;
+    const next: FreeSpan[] = [];
+    for (const span of spans) {
+      if (blockEnd <= span.start || blockStart >= span.end) {
+        next.push(span);
+        continue;
+      }
+      if (blockStart > span.start) next.push({ start: span.start, end: blockStart });
+      if (blockEnd < span.end) next.push({ start: blockEnd, end: span.end });
+    }
+    spans = next;
   }
-  return { w: longest * aspect, h: longest };
+  return spans.filter((s) => s.end - s.start >= minSpan);
+}
+
+function spanLength(spans: FreeSpan[]): number {
+  return spans.reduce((sum, s) => sum + (s.end - s.start), 0);
+}
+
+/** Split `count` items across parts proportionally, summing exactly. */
+function apportion(weights: number[], count: number): number[] {
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  const exact = weights.map((w) => (w / total) * count);
+  const alloc = exact.map((v) => Math.floor(v));
+  let assigned = alloc.reduce((a, b) => a + b, 0);
+  const order = exact
+    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let k = 0; assigned < count && order.length > 0; k++, assigned++) {
+    alloc[order[k % order.length].i] += 1;
+  }
+  return alloc;
+}
+
+/** Evenly divided slots across a wall's free spans, widest span first. */
+function slotsFor(spans: FreeSpan[], count: number): Array<{ offset: number; width: number }> {
+  if (count <= 0 || spans.length === 0) return [];
+  const alloc = apportion(
+    spans.map((s) => s.end - s.start),
+    count,
+  );
+  const slots: Array<{ offset: number; width: number }> = [];
+  spans.forEach((span, i) => {
+    const n = alloc[i];
+    if (n <= 0) return;
+    const width = (span.end - span.start) / n;
+    for (let j = 0; j < n; j++) {
+      slots.push({ offset: span.start + width * (j + 0.5), width });
+    }
+  });
+  return slots.sort((a, b) => a.offset - b.offset);
 }
 
 /** Distribute works across the room's walls, skipping door spans. */
@@ -360,65 +445,139 @@ function hangRoom(
   const runs = wallRuns(room);
   const salon = density === "salon" && room.archetype.salonCapable;
 
-  // Heroes first: each takes a full wall (prefer walls without doors).
+  // Heroes first: each takes a whole wall. Doorless walls are preferred,
+  // but once those are used we keep cycling through the remaining walls —
+  // previously a third hero fell back to runs[0] and landed exactly on top
+  // of the first one.
   const heroes = works.filter((w) => w.hero);
   const rest = works.filter((w) => !w.hero);
   const heroWalls = new Set<WallSide>();
+  const leftoverHeroes: ArtworkView[] = [];
   for (const hero of heroes) {
-    const run = runs.find((r) => r.doors.length === 0 && !heroWalls.has(r.side)) ?? runs[0];
+    const run =
+      runs.find((r) => r.doors.length === 0 && !heroWalls.has(r.side)) ??
+      runs.find((r) => !heroWalls.has(r.side));
+    if (!run) {
+      // Every wall already carries a hero; hang the rest normally.
+      leftoverHeroes.push(hero);
+      continue;
+    }
+    const spans = freeSpans(run);
+    const widest = spans.sort((a, b) => b.end - b.start - (a.end - a.start))[0];
+    if (!widest) {
+      leftoverHeroes.push(hero);
+      continue;
+    }
     heroWalls.add(run.side);
-    const size = artworkSize(hero, true);
-    placed.push(placeOnWall(room, run.side, 0, EYE_HEIGHT + 0.15, hero, size));
+    const size = artworkSize(
+      hero,
+      true,
+      widest.end - widest.start - MIN_GAP,
+      room.ceiling - 1.0,
+    );
+    const centre = (widest.start + widest.end) / 2;
+    placed.push(
+      placeOnWall(
+        room,
+        run.side,
+        centre,
+        heroBaseline(room, size.h),
+        hero,
+        size,
+      ),
+    );
   }
 
-  // Distribute the rest around remaining walls proportionally to length.
+  // Distribute the remainder across the walls no hero claimed, in
+  // proportion to hangable (door-free) wall length. If heroes took every
+  // wall, fall back to all four so nothing is silently dropped.
+  const remaining = [...leftoverHeroes, ...rest];
   const available = runs.filter((r) => !heroWalls.has(r.side));
-  const totalLen = available.reduce((s, r) => s + r.length, 0) || 1;
-  let cursor = 0;
-  const counts = available.map((r, i) =>
-    i === available.length - 1
-      ? rest.length - cursor
-      : Math.min(rest.length - cursor, Math.round((r.length / totalLen) * rest.length)),
+  const candidates = available.length > 0 ? available : runs;
+
+  // Only walls that actually have hangable space take a share. A short
+  // wall whose span is entirely consumed by a doorway gets nothing — its
+  // pieces move to the walls that can hold them rather than being dropped.
+  let walls = candidates
+    .map((run) => ({ run, spans: freeSpans(run) }))
+    .filter((w) => w.spans.length > 0);
+  if (walls.length === 0) {
+    walls = candidates
+      .map((run) => ({ run, spans: freeSpans(run, true) }))
+      .filter((w) => w.spans.length > 0);
+  }
+  if (walls.length === 0) {
+    // Every wall is doorway: hang along the room's longest wall anyway.
+    const widest = [...candidates].sort((a, b) => b.length - a.length)[0];
+    walls = [{ run: widest, spans: [{ start: -widest.length / 4, end: widest.length / 4 }] }];
+  }
+
+  const counts = apportion(
+    walls.map((w) => spanLength(w.spans)),
+    remaining.length,
   );
-  counts.forEach((c, i) => {
-    if (c > 0) cursor += c;
-  });
 
   let workIdx = 0;
-  available.forEach((run, i) => {
-    const count = Math.max(0, counts[i] ?? 0);
-    const group = rest.slice(workIdx, workIdx + count);
-    workIdx += count;
-    if (group.length === 0) return;
+  walls.forEach((wall, i) => {
+    const group = remaining.slice(workIdx, workIdx + counts[i]);
+    workIdx += counts[i];
+    if (group.length === 0 || wall.spans.length === 0) return;
 
-    const rows = salon && group.length > 3 ? 2 : 1;
-    const perRow = Math.ceil(group.length / rows);
+    // Add rows before shrinking: a crowded wall reads better as a salon
+    // stack than as a row of postage stamps. Row count is bounded by what
+    // the ceiling can actually carry.
+    const usable = spanLength(wall.spans);
+    const rowsByHeight = Math.max(1, Math.floor((room.ceiling - 0.8) / 1.15));
+    const maxRows = Math.min(salon ? 3 : 2, rowsByHeight);
+    let rows = 1;
+    while (
+      rows < maxRows &&
+      usable / Math.ceil(group.length / rows) - MIN_GAP < COMFORTABLE_WIDTH
+    ) {
+      rows += 1;
+    }
+
+    let perRow = Math.ceil(group.length / rows);
+    const slots = slotsFor(wall.spans, perRow);
+    if (slots.length === 0) return;
+    // Fragmented spans can yield fewer slots than asked for; add rows so
+    // every piece still gets its own slot.
+    if (slots.length < perRow) {
+      perRow = slots.length;
+      rows = Math.ceil(group.length / perRow);
+    }
+
+    const bandHeight = Math.min(1.35, (room.ceiling - 0.7) / rows);
+    const stackTop = Math.min(
+      room.ceiling - 0.35,
+      EYE_HEIGHT + (bandHeight * rows) / 2,
+    );
+
     group.forEach((work, j) => {
       const row = Math.floor(j / perRow);
-      const col = j % perRow;
-      const size = artworkSize(work, false);
-      const y = rows === 2 ? (row === 0 ? EYE_HEIGHT + 0.75 : EYE_HEIGHT - 0.35) : EYE_HEIGHT;
-      const slot = slotOffset(run, col, perRow);
-      placed.push(placeOnWall(room, run.side, slot, y, work, size));
+      const slot = slots[j % perRow];
+      const size = artworkSize(
+        work,
+        false,
+        Math.max(0.15, slot.width - MIN_GAP),
+        bandHeight - 0.12,
+      );
+      const y =
+        rows === 1
+          ? EYE_HEIGHT
+          : Math.max(size.h / 2 + 0.3, stackTop - bandHeight * (row + 0.5));
+      placed.push(placeOnWall(room, wall.run.side, slot.offset, y, work, size));
     });
   });
 
   return placed;
 }
 
-/** Even slots along a wall, avoiding door spans and margins. */
-function slotOffset(run: WallRun, index: number, count: number): number {
-  const usable = run.length - 2 * WALL_MARGIN;
-  const step = usable / (count + 1);
-  let offset = -usable / 2 + step * (index + 1);
-  // Nudge out of any door span.
-  for (const door of run.doors) {
-    const half = door.width / 2 + 0.5;
-    if (Math.abs(offset - door.offset) < half) {
-      offset = door.offset + (offset >= door.offset ? half : -half);
-    }
-  }
-  return offset;
+/** Hero centre height: eye-ish, but always clear of floor and ceiling. */
+function heroBaseline(room: LayoutRoom, height: number): number {
+  const lowest = height / 2 + 0.35;
+  const highest = room.ceiling - height / 2 - 0.3;
+  return Math.min(Math.max(EYE_HEIGHT + 0.15, lowest), Math.max(lowest, highest));
 }
 
 function placeOnWall(
@@ -525,17 +684,30 @@ function collisionWalls(rooms: LayoutRoom[]): WallSegment[] {
 // Helpers for consumers
 // ---------------------------------------------------------------------------
 
+/**
+ * The room containing a point. Rooms are matched strictly first; only if
+ * the point falls in the gap between rooms (a doorway) do we fall back to
+ * the nearest room. Returning the first tolerance match instead made the
+ * active room depend on array order, which flickered the lighting rig
+ * while a visitor stood in a doorway.
+ */
 export function roomAtPoint(layout: GalleryLayout, x: number, z: number): LayoutRoom | null {
+  let nearest: LayoutRoom | null = null;
+  let nearestDistance = Infinity;
+
   for (const room of layout.rooms) {
     const [cx, cz] = room.center;
-    if (
-      Math.abs(x - cx) <= room.width / 2 + 0.3 &&
-      Math.abs(z - cz) <= room.depth / 2 + 0.3
-    ) {
-      return room;
+    const dx = Math.abs(x - cx) - room.width / 2;
+    const dz = Math.abs(z - cz) - room.depth / 2;
+    if (dx <= 0 && dz <= 0) return room; // strictly inside
+
+    const outside = Math.max(dx, dz);
+    if (outside <= ROOM_GAP + 0.35 && outside < nearestDistance) {
+      nearest = room;
+      nearestDistance = outside;
     }
   }
-  return null;
+  return nearest;
 }
 
 /** Standing point in front of an artwork (for focus mode / deep links). */
@@ -554,7 +726,7 @@ export function roomsToConfig(
   dbRooms: Room[],
   artworks: ArtworkView[],
 ): RoomConfigInput[] {
-  return dbRooms.map((r) => ({
+  const configs = dbRooms.map((r) => ({
     id: r.id,
     archetype: r.archetype,
     footprintM2: r.footprintM2,
@@ -570,4 +742,18 @@ export function roomsToConfig(
       .sort((a, b) => a.sortOrder - b.sortOrder)
       .map((a) => a.id),
   }));
+
+  // Anything not assigned to a room — newly ingested work, or a piece whose
+  // room was deleted — joins the last hangable room instead of vanishing
+  // from the gallery.
+  const assigned = new Set(configs.flatMap((c) => c.artworkIds));
+  const orphans = artworks
+    .filter((a) => !assigned.has(a.id))
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((a) => a.id);
+  if (orphans.length > 0 && configs.length > 0) {
+    const target = [...configs].reverse().find((c) => c.kind === "room") ?? configs[0];
+    target.artworkIds.push(...orphans);
+  }
+  return configs;
 }

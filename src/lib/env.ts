@@ -41,6 +41,8 @@ const serverSchema = z.object({
   DROPBOX_APP_SECRET: z.string().default(""),
 
   CRON_SECRET: z.string().default("dev-secret"),
+  // Dedicated signing key for OAuth state; falls back to CRON_SECRET in dev.
+  OAUTH_STATE_SECRET: z.string().default(""),
 
   FEATURE_AI_SKYBOX: z
     .string()

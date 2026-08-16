@@ -17,17 +17,15 @@ export function ArtworkMesh({
   placed,
   residency,
   lightingRigId,
+  spotlightEnabled = true,
 }: {
   placed: PlacedArtwork;
   residency: Residency;
   lightingRigId: string;
+  spotlightEnabled?: boolean;
 }) {
   const focusArtwork = useSceneStore((s) => s.focusArtwork);
-  const focused = useSceneStore((s) => s.focusedArtworkId) === placed.artwork.id;
-  const texture = useArtworkTexture(
-    placed.artwork.urls,
-    focused ? "focused" : residency,
-  );
+  const texture = useArtworkTexture(placed.artwork.urls, residency);
 
   const frame = FRAME_STYLES[placed.artwork.frameStyle] ?? FRAME_STYLES["thin-black-metal"];
   const rig = LIGHTING_RIGS[lightingRigId] ?? LIGHTING_RIGS["bright-daylight"];
@@ -69,7 +67,7 @@ export function ArtworkMesh({
       </mesh>
 
       {/* Per-piece spotlight toggle */}
-      {placed.artwork.spotlight ? (
+      {placed.artwork.spotlight && spotlightEnabled ? (
         <SpotFor
           width={outerW}
           height={outerH}

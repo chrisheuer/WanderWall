@@ -7,8 +7,9 @@ import { supabaseBrowser } from "@/lib/supabase/client";
 function LoginForm() {
   const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const params = useSearchParams();
+  // A failed callback (expired or already-used link) redirects back here.
+  const [error, setError] = useState<string | null>(params.get("error"));
 
   async function sendLink(e: React.FormEvent) {
     e.preventDefault();

@@ -128,23 +128,63 @@ function startScene() {
     key.position.set(-r.keyDirection[0] * 10, -r.keyDirection[1] * 10, -r.keyDirection[2] * 10);
   }
 
-  // Rooms.
-  const clickTargets = [];
-  const floorMeshes = [];
+  /* Residency: only the active room and the rooms through its doors are in
+   * the scene. Building and texturing every room up front would load ~120
+   * full-size textures at once, which exhausts GPU memory on the phones
+   * this export is meant to run on. Room content is built on first entry
+   * and its textures are released when the room leaves residency. */
+  const texLoader = new THREE.TextureLoader();
+  const roomBundles = new Map(); // index -> { group, floors, canvases, arts }
+  let clickTargets = [];
+  let floorMeshes = [];
+
+  const adjacency = new Map();
   for (const room of layout.rooms) {
-    buildRoom(scene, room, floorMeshes);
+    adjacency.set(room.index, new Set((room.doors || []).map((d) => d.toRoomIndex)));
   }
 
-  // Artworks.
-  const texLoader = new THREE.TextureLoader();
-  const artMeshes = [];
-  for (const room of layout.rooms) {
+  function bundleFor(index) {
+    let bundle = roomBundles.get(index);
+    if (bundle) return bundle;
+    const room = layout.rooms[index];
+    const group = new THREE.Group();
+    const floors = [];
+    buildRoom(group, room, floors);
+    const arts = [];
+    const canvases = [];
     for (const placed of room.artworks) {
-      const group = buildArtwork(placed, texLoader);
-      group.userData.placed = placed;
-      scene.add(group);
-      artMeshes.push(group);
-      clickTargets.push(...group.children.filter((c) => c.userData.isCanvas));
+      const art = buildArtwork(placed, texLoader);
+      art.userData.placed = placed;
+      group.add(art);
+      arts.push(art);
+      canvases.push(...art.children.filter((c) => c.userData.isCanvas));
+    }
+    bundle = { group, floors, canvases, arts, index };
+    roomBundles.set(index, bundle);
+    return bundle;
+  }
+
+  function updateResidency(index) {
+    const neighbors = adjacency.get(index) || new Set();
+    const resident = new Set([index, ...neighbors]);
+
+    for (const [i, bundle] of roomBundles) {
+      if (!resident.has(i) && bundle.group.parent) {
+        scene.remove(bundle.group);
+        for (const art of bundle.arts) art.userData.releaseTexture();
+      }
+    }
+
+    clickTargets = [];
+    floorMeshes = [];
+    for (const i of resident) {
+      if (i == null || !layout.rooms[i]) continue;
+      const bundle = bundleFor(i);
+      if (!bundle.group.parent) scene.add(bundle.group);
+      // Active room gets wall-resolution art; neighbours pre-warm at thumb.
+      for (const art of bundle.arts) art.userData.loadTexture(i === index ? "wall" : "thumb");
+      clickTargets.push(...bundle.canvases);
+      floorMeshes.push(...bundle.floors);
     }
   }
 
@@ -236,6 +276,15 @@ function startScene() {
   renderMiniMap((target) => {
     camera.position.set(target[0], EYE, target[1]);
     setFocus(null);
+    // Teleporting must move residency with the camera, not wait for a step.
+    const landed = roomAt(target[0], target[1]);
+    if (landed && landed.index !== activeRoomIndex) {
+      activeRoomIndex = landed.index;
+      applyRig(landed.lightingRig);
+      roomLabelEl.textContent = landed.chapterLabel || landed.name || "";
+      updateMiniMap();
+    }
+    updateResidency(activeRoomIndex);
   });
 
   // Touch joystick.
@@ -284,6 +333,7 @@ function startScene() {
           applyRig(room.lightingRig);
           roomLabelEl.textContent = room.chapterLabel || room.name || "";
           updateMiniMap();
+          updateResidency(activeRoomIndex);
         }
       }
     }
@@ -293,22 +343,31 @@ function startScene() {
     requestAnimationFrame(frame);
   }
 
+  // Compare against the CSS size we last applied, not the drawing-buffer
+  // size — those differ whenever devicePixelRatio !== 1, which made this
+  // reallocate the buffer every single frame on exactly the low-end
+  // devices the export targets.
+  let lastW = 0;
+  let lastH = 0;
   function resize() {
     const w = app.clientWidth;
     const h = app.clientHeight;
-    if (renderer.domElement.width !== w || renderer.domElement.height !== h) {
-      renderer.setSize(w, h, false);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-    }
+    if (w === lastW && h === lastH) return;
+    lastW = w;
+    lastH = h;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / (h || 1);
+    camera.updateProjectionMatrix();
   }
 
   applyRig(layout.rooms[0].lightingRig);
   roomLabelEl.textContent = layout.rooms[0].chapterLabel || layout.rooms[0].name || "";
+  updateResidency(activeRoomIndex);
   frame();
 }
 
-function buildRoom(scene, room, floorMeshes) {
+function buildRoom(parent, room, floorMeshes) {
+  const scene = parent; // parent is a per-room Group; see updateResidency
   const [cx, cz] = room.center;
   const halfW = room.width / 2;
   const halfD = room.depth / 2;
@@ -424,16 +483,39 @@ function buildArtwork(placed, texLoader) {
   canvas.userData.isCanvas = true;
   group.add(canvas);
 
-  const url = placed.artwork.urls.wall || placed.artwork.urls.thumb;
-  if (url) {
+  // Textures load on demand and are disposed when the room leaves
+  // residency, so GPU memory tracks the rooms you can actually see.
+  const placeholder = (placed.artwork.dominantColors && placed.artwork.dominantColors[0]) || "#d8d5cc";
+  let loadedSize = null;
+  let loadedTex = null;
+
+  group.userData.loadTexture = (size) => {
+    const url = placed.artwork.urls[size] || placed.artwork.urls.wall || placed.artwork.urls.thumb;
+    if (!url) return;
+    // Never downgrade a texture that is already at a higher resolution.
+    if (loadedSize === size || (loadedSize === "wall" && size === "thumb")) return;
     texLoader.load(url, (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = 4;
+      if (loadedTex) loadedTex.dispose();
+      loadedTex = tex;
+      loadedSize = size;
       canvasMat.map = tex;
       canvasMat.color.set(0xffffff);
       canvasMat.needsUpdate = true;
     });
-  }
+  };
+
+  group.userData.releaseTexture = () => {
+    if (!loadedTex) return;
+    canvasMat.map = null;
+    canvasMat.color.set(placeholder);
+    canvasMat.needsUpdate = true;
+    loadedTex.dispose();
+    loadedTex = null;
+    loadedSize = null;
+  };
+
   return group;
 }
 

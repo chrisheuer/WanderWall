@@ -91,10 +91,24 @@ export function GalleryViewer({
     return map;
   }, [layout]);
 
+  /**
+   * Residency is enforced by mounting, not just by texture choice: only
+   * the active room and the rooms reachable through its doors exist in the
+   * scene graph. Everything beyond is unmounted, which releases its
+   * texture pins and lets the LRU reclaim them. This is what keeps a
+   * 120-piece gallery inside the mobile texture budget — rendering every
+   * room would load every piece on first paint.
+   */
+  const residentRooms = useMemo(() => {
+    const neighbors = adjacency.get(activeRoomIndex) ?? new Set<number>();
+    return layout.rooms.filter(
+      (room) => room.index === activeRoomIndex || neighbors.has(room.index),
+    );
+  }, [layout, adjacency, activeRoomIndex]);
+
   function residencyFor(placed: PlacedArtwork): Residency {
-    if (placed.roomIndex === activeRoomIndex) return "active";
-    if (adjacency.get(activeRoomIndex)?.has(placed.roomIndex)) return "adjacent";
-    return "far";
+    if (focusedArtworkId === placed.artwork.id) return "focused";
+    return placed.roomIndex === activeRoomIndex ? "active" : "adjacent";
   }
 
   if (mode === "list") {
@@ -137,17 +151,20 @@ export function GalleryViewer({
         shadows={false}
       >
         <Lighting rigId={activeRoom.lightingRig} outdoor={activeRoom.archetype.outdoor} />
-        {layout.rooms.map((room) => (
+        {residentRooms.map((room) => (
           <RoomMesh key={room.index} room={room} />
         ))}
-        <InstancedFrames layout={layout} />
-        {layout.rooms.map((room) =>
+        <InstancedFrames rooms={residentRooms} />
+        {residentRooms.map((room) =>
           room.artworks.map((placed) => (
             <ArtworkMesh
               key={placed.artwork.id}
               placed={placed}
               residency={residencyFor(placed)}
               lightingRigId={activeRoom.lightingRig}
+              // Spotlights are real lights; keeping them off in adjacent
+              // rooms stops far rooms from lighting an empty scene.
+              spotlightEnabled={room.index === activeRoomIndex}
             />
           )),
         )}
