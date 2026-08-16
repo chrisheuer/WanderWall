@@ -1,16 +1,21 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { asc, eq } from "drizzle-orm";
+import { db, tables } from "@/db";
 import { requireCreator } from "@/lib/auth";
 import {
+  derivativeUrl,
   galleryArtworks,
   galleryByIdForCreator,
-  toArtworkView,
 } from "@/lib/galleries";
 import { editWindowOpen } from "@/lib/tiers";
-import { ArtworkGrid } from "@/components/ArtworkGrid";
 import { UploadDropzone } from "@/components/studio/UploadDropzone";
 import { UrlImport } from "@/components/studio/UrlImport";
 import { EditWindowCountdown } from "@/components/studio/EditWindowCountdown";
+import { GallerySettingsForm } from "@/components/studio/GallerySettingsForm";
+import { PublishPanel } from "@/components/studio/PublishPanel";
+import { RoomManagerPanel, type RoomRow } from "@/components/studio/RoomManagerPanel";
+import { WorksManager, type WorkRow } from "@/components/studio/WorksManager";
 
 export const dynamic = "force-dynamic";
 
@@ -23,12 +28,42 @@ export default async function GalleryStudioPage(props: {
   if (!gallery) notFound();
 
   const artworks = await galleryArtworks(gallery.id);
-  const views = artworks.map((a) => toArtworkView(a, gallery));
-  const statuses = Object.fromEntries(artworks.map((a) => [a.id, a.ingestStatus]));
+  const dbRooms = await db()
+    .select()
+    .from(tables.rooms)
+    .where(eq(tables.rooms.galleryId, gallery.id))
+    .orderBy(asc(tables.rooms.sortOrder));
+
   const editable =
     gallery.status !== "readonly" &&
     gallery.status !== "frozen" &&
     (gallery.tier !== "download" || editWindowOpen(gallery.editWindowExpiresAt));
+
+  const workRows: WorkRow[] = artworks.map((a) => ({
+    id: a.id,
+    title: a.title,
+    caption: a.caption,
+    thumbUrl: derivativeUrl(a.derivativeKeys?.thumb),
+    ingestStatus: a.ingestStatus,
+    ingestError: a.ingestError,
+    roomId: a.roomId,
+    sortOrder: a.sortOrder,
+    frameStyleOverride: a.frameStyleOverride,
+    licenseOverride: a.licenseOverride,
+    spotlight: a.spotlight,
+    hero: a.hero,
+  }));
+
+  const roomRows: RoomRow[] = dbRooms.map((r) => ({
+    id: r.id,
+    name: r.name,
+    chapterLabel: r.chapterLabel,
+    archetype: r.archetype,
+    lightingRig: r.lightingRig,
+    kind: r.kind,
+    sortOrder: r.sortOrder,
+    pieceCount: artworks.filter((a) => a.roomId === r.id).length,
+  }));
 
   return (
     <main className="container" style={{ padding: "48px 24px" }}>
@@ -46,8 +81,36 @@ export default async function GalleryStudioPage(props: {
         <EditWindowCountdown expiresAt={gallery.editWindowExpiresAt.toISOString()} />
       ) : null}
 
+      <section style={{ marginTop: 32 }}>
+        <h2>Publish</h2>
+        <PublishPanel
+          galleryId={gallery.id}
+          gallerySlug={gallery.slug}
+          status={gallery.status}
+          tier={gallery.tier}
+          attested={Boolean(gallery.ownershipAttestedAt)}
+        />
+      </section>
+
+      <section style={{ marginTop: 32 }}>
+        <h2>Settings</h2>
+        <GallerySettingsForm
+          gallery={{
+            id: gallery.id,
+            title: gallery.title,
+            statement: gallery.statement,
+            environmentArchetype: gallery.environmentArchetype,
+            hangDensity: gallery.hangDensity,
+            frameStyleDefault: gallery.frameStyleDefault,
+            lightingDefault: gallery.lightingDefault,
+            licenseDefault: gallery.licenseDefault,
+          }}
+        />
+      </section>
+
       {editable ? (
-        <section style={{ marginTop: 24, maxWidth: 640 }}>
+        <section style={{ marginTop: 32, maxWidth: 640 }}>
+          <h2>Add works</h2>
           <UploadDropzone galleryId={gallery.id} />
           <UrlImport galleryId={gallery.id} />
         </section>
@@ -60,13 +123,20 @@ export default async function GalleryStudioPage(props: {
         </p>
       )}
 
-      <section style={{ marginTop: 40 }}>
+      <section style={{ marginTop: 32 }}>
+        <h2>Rooms</h2>
+        <RoomManagerPanel galleryId={gallery.id} rooms={roomRows} editable={editable} />
+      </section>
+
+      <section style={{ marginTop: 32 }}>
         <h2>Works</h2>
-        <ArtworkGrid
-          artworks={views}
-          creatorName={creator.displayName || creator.email}
-          showStatus
-          statuses={statuses}
+        <WorksManager
+          works={workRows}
+          rooms={roomRows.map((r) => ({
+            id: r.id,
+            label: r.name ?? `${r.kind} ${r.sortOrder + 1}`,
+          }))}
+          editable={editable}
         />
       </section>
     </main>
