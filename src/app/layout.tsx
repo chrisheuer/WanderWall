@@ -28,6 +28,13 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </header>
         </div>
         {children}
+        <footer className="container" style={{ padding: "32px 24px", borderTop: "1px solid var(--line)" }}>
+          <nav className="nav-links small">
+            <Link href="/legal/terms">Terms</Link>
+            <Link href="/legal/privacy">Privacy</Link>
+            <Link href="/pricing">Pricing</Link>
+          </nav>
+        </footer>
       </body>
     </html>
   );

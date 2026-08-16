@@ -12,6 +12,9 @@ import {
 import { BillingPanel } from "@/components/studio/BillingPanel";
 import { CloudImportPanel } from "@/components/studio/CloudImportPanel";
 import { ExportPanel } from "@/components/studio/ExportPanel";
+import { EnvironmentTools } from "@/components/studio/EnvironmentTools";
+import { FeatureSubmitButton } from "@/components/studio/FeatureSubmitButton";
+import { galleryStats } from "@/lib/analytics";
 import { isConnected } from "@/lib/cloud-imports";
 import { editWindowOpen } from "@/lib/tiers";
 import { UploadDropzone } from "@/components/studio/UploadDropzone";
@@ -33,12 +36,17 @@ export default async function GalleryStudioPage(props: {
   if (!gallery) notFound();
 
   const artworks = await galleryArtworks(gallery.id);
-  const [isHosted, subscription, gdriveConnected, dropboxConnected] = await Promise.all([
+  const [isHosted, subscription, gdriveConnected, dropboxConnected, stats] = await Promise.all([
     hostingActive(gallery.id),
     latestSubscription(gallery.id),
     isConnected(creator.id, "gdrive"),
     isConnected(creator.id, "dropbox"),
+    galleryStats(gallery.id),
   ]);
+  const seededSwatches =
+    ((gallery.environmentParams as Record<string, unknown> | null)?.seededPalette as
+      | { swatches?: string[] }
+      | undefined)?.swatches ?? [];
   const dbRooms = await db()
     .select()
     .from(tables.rooms)
@@ -130,6 +138,48 @@ export default async function GalleryStudioPage(props: {
             licenseDefault: gallery.licenseDefault,
           }}
         />
+        <EnvironmentTools galleryId={gallery.id} seededSwatches={seededSwatches} />
+      </section>
+
+      <section style={{ marginTop: 32 }}>
+        <h2>Visitors &amp; donations</h2>
+        <div className="card" style={{ maxWidth: 640 }}>
+          <table className="plain">
+            <tbody>
+              <tr>
+                <td>Visits</td>
+                <td>{stats.visits}</td>
+              </tr>
+              <tr>
+                <td>Unique visitors</td>
+                <td>{stats.uniques}</td>
+              </tr>
+              <tr>
+                <td>Average time</td>
+                <td>
+                  {Math.floor(stats.avgSeconds / 60)}m {stats.avgSeconds % 60}s
+                </td>
+              </tr>
+              <tr>
+                <td>Donations</td>
+                <td>
+                  {stats.donationCount} (${(stats.donationCents / 100).toFixed(2)})
+                </td>
+              </tr>
+              <tr>
+                <td>Donation conversion</td>
+                <td>{(stats.conversion * 100).toFixed(1)}% of uniques</td>
+              </tr>
+            </tbody>
+          </table>
+          <p className="muted small" style={{ marginBottom: 0 }}>
+            First-party analytics only — no third-party trackers.
+          </p>
+        </div>
+        {gallery.status === "published" && !gallery.featured ? (
+          <FeatureSubmitButton galleryId={gallery.id} />
+        ) : null}
+        {gallery.featured ? <p className="notice">This gallery is featured. ✦</p> : null}
       </section>
 
       {editable ? (

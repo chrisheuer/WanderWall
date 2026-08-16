@@ -244,6 +244,12 @@ export function buildLayout(input: LayoutInput): GalleryLayout {
   const rooms: LayoutRoom[] = [];
   let cursorX = 0;
 
+  // "Seed with a photo": a reference-image palette overrides the archetype
+  // wall color unless the room sets one explicitly.
+  const seeded = (input.environmentParams?.seededPalette ?? null) as {
+    wall?: string;
+  } | null;
+
   roomConfigs.forEach((cfg, index) => {
     const archetype = ARCHETYPES[cfg.archetype] ?? ARCHETYPES["white-cube"];
     let width: number;
@@ -274,7 +280,7 @@ export function buildLayout(input: LayoutInput): GalleryLayout {
       name: cfg.name ?? (cfg.kind === "corridor" ? "Passage" : cfg.kind === "courtyard" ? "Courtyard" : `Room ${toRoman(index + 1)}`),
       chapterLabel: cfg.chapterLabel,
       archetype,
-      wallColor: cfg.wallColor ?? archetype.palette.wall,
+      wallColor: cfg.wallColor ?? seeded?.wall ?? archetype.palette.wall,
       floorMaterial: cfg.floorMaterial ?? archetype.floorMaterial,
       lightingRig: cfg.lightingRig ?? archetype.defaultLightingRig,
       center,
