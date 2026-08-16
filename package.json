@@ -13,11 +13,11 @@
     "worker": "tsx src/worker/index.ts"
   },
   "dependencies": {
+    "@react-email/components": "^0.0.25",
     "@react-three/drei": "^9.114.0",
     "@react-three/fiber": "^8.17.0",
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.45.0",
-    "@react-email/components": "^0.0.25",
     "archiver": "^7.0.1",
     "drizzle-orm": "^0.36.0",
     "nanoid": "^5.0.7",
@@ -30,7 +30,8 @@
     "sharp": "^0.33.5",
     "stripe": "^17.3.0",
     "three": "^0.169.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@types/archiver": "^6.0.2",
