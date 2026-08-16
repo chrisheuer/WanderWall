@@ -10,6 +10,8 @@ import {
   galleryByIdForCreator,
 } from "@/lib/galleries";
 import { BillingPanel } from "@/components/studio/BillingPanel";
+import { CloudImportPanel } from "@/components/studio/CloudImportPanel";
+import { isConnected } from "@/lib/cloud-imports";
 import { editWindowOpen } from "@/lib/tiers";
 import { UploadDropzone } from "@/components/studio/UploadDropzone";
 import { UrlImport } from "@/components/studio/UrlImport";
@@ -30,9 +32,11 @@ export default async function GalleryStudioPage(props: {
   if (!gallery) notFound();
 
   const artworks = await galleryArtworks(gallery.id);
-  const [isHosted, subscription] = await Promise.all([
+  const [isHosted, subscription, gdriveConnected, dropboxConnected] = await Promise.all([
     hostingActive(gallery.id),
     latestSubscription(gallery.id),
+    isConnected(creator.id, "gdrive"),
+    isConnected(creator.id, "dropbox"),
   ]);
   const dbRooms = await db()
     .select()
@@ -132,6 +136,11 @@ export default async function GalleryStudioPage(props: {
           <h2>Add works</h2>
           <UploadDropzone galleryId={gallery.id} />
           <UrlImport galleryId={gallery.id} />
+          <CloudImportPanel
+            galleryId={gallery.id}
+            gdriveConnected={gdriveConnected}
+            dropboxConnected={dropboxConnected}
+          />
         </section>
       ) : (
         <p className="notice" style={{ marginTop: 24 }}>
