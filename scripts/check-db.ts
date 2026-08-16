@@ -87,6 +87,9 @@ async function main() {
   check("null source_ref rows do not collide", u1.length === 1 && u2.length === 1);
 
   // --- purchases: one creation per gallery ---------------------------
+  // Mirrors the webhook: the conflict target is the session id only, so a
+  // redelivery is idempotent while a genuinely second creation charge
+  // trips the one-per-gallery index instead of being swallowed.
   const buy = (kind: "creation" | "annual_bundle" | "download", session: string) =>
     db()
       .insert(tables.purchases)
@@ -97,16 +100,31 @@ async function main() {
         amountCents: 2999,
         stripeCheckoutSessionId: session,
       })
-      .onConflictDoNothing()
+      .onConflictDoNothing({ target: tables.purchases.stripeCheckoutSessionId })
       .returning();
 
   const p1 = await buy("creation", `cs_${suffix}_1`);
-  const p2 = await buy("creation", `cs_${suffix}_2`);
+  check("first creation purchase is recorded", p1.length === 1);
+
+  // Same session again = redelivery: absorbed silently.
+  const replay = await buy("creation", `cs_${suffix}_1`);
+  check("redelivery of the same session is idempotent", replay.length === 0);
+
+  // A different session = a second real charge: must be visible.
+  let surfaced = false;
+  let constraint = "";
+  try {
+    await buy("creation", `cs_${suffix}_2`);
+  } catch (err) {
+    constraint = (err as { constraint?: string }).constraint ?? "";
+    surfaced = constraint === "purchases_one_creation_per_gallery_idx";
+  }
   check(
-    "second creation purchase is refused",
-    p1.length === 1 && p2.length === 0,
-    "a gallery was charged creation twice",
+    "a second creation charge surfaces instead of being swallowed",
+    surfaced,
+    constraint ? `raised ${constraint}` : "no error was raised — a double charge would go unnoticed",
   );
+
   const p3 = await buy("download", `cs_${suffix}_3`);
   check("a download purchase is still allowed alongside", p3.length === 1);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
 /**
@@ -142,12 +142,12 @@ export function useArtworkTexture(
   residency: Residency,
 ): THREE.Texture | null {
   const [texture, setTexture] = useState<THREE.Texture | null>(null);
+  const displayed = useRef<string | null>(null);
   const target = urlForResidency(urls, residency);
 
   useEffect(() => {
     if (!target) return;
     let alive = true;
-    let acquired: string | null = null;
 
     textureCache
       .acquire(target)
@@ -156,8 +156,15 @@ export function useArtworkTexture(
           textureCache.release(target);
           return;
         }
-        acquired = target;
+        // Hand over, then let go: the previous texture is still assigned
+        // to this mesh's material until the replacement is set, so
+        // releasing it in the effect cleanup would leave an on-screen
+        // texture unpinned and evictable — exactly during a room
+        // transition, when eviction pressure is highest.
+        const previous = displayed.current;
+        displayed.current = target;
         setTexture(t);
+        if (previous) textureCache.release(previous);
       })
       .catch(() => {
         // Broken derivative: keep whatever was already shown.
@@ -165,9 +172,18 @@ export function useArtworkTexture(
 
     return () => {
       alive = false;
-      if (acquired) textureCache.release(acquired);
     };
   }, [target]);
+
+  // The pin is held for as long as the mesh exists, released on unmount.
+  useEffect(() => {
+    return () => {
+      if (displayed.current) {
+        textureCache.release(displayed.current);
+        displayed.current = null;
+      }
+    };
+  }, []);
 
   return texture;
 }

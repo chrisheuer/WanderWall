@@ -3,7 +3,7 @@ import { db, tables } from "@/db";
 import { env } from "@/lib/env";
 import { storage } from "@/lib/storage";
 import { enqueue, QUEUES } from "@/lib/queue";
-import { BlockedUrlError, safeFetchImage } from "@/lib/safe-fetch";
+import { BlockedUrlError, safeFetchImage, unwrapBlocked } from "@/lib/safe-fetch";
 
 /**
  * Server-side copy of a pasted URL — we store a copy, never hotlink.
@@ -39,15 +39,26 @@ export async function runUrlFetchJob(data: UrlFetchJobData): Promise<void> {
       allowedContentType: ALLOWED_CONTENT_TYPES,
     });
   } catch (err) {
+    const unwrapped = unwrapBlocked(err);
     // A refused URL is the creator's problem to fix, not a transient
     // fault — record it and don't burn retries.
-    if (err instanceof BlockedUrlError) {
+    if (unwrapped instanceof BlockedUrlError) {
       await db()
         .update(tables.artworks)
-        .set({ ingestStatus: "failed", ingestError: err.message.slice(0, 500) })
+        .set({ ingestStatus: "failed", ingestError: unwrapped.message.slice(0, 500) })
         .where(eq(tables.artworks.id, artworkId));
       return;
     }
+    // Genuinely transient: retry, but leave the reason visible so a piece
+    // that never succeeds does not sit there explaining nothing.
+    await db()
+      .update(tables.artworks)
+      .set({
+        ingestError: `fetch failed, retrying: ${
+          err instanceof Error ? err.message : String(err)
+        }`.slice(0, 500),
+      })
+      .where(eq(tables.artworks.id, artworkId));
     throw err;
   }
 

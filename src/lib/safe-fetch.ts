@@ -31,7 +31,7 @@ function isBlockedIPv4(address: string): boolean {
   if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
     return true;
   }
-  const [a, b] = parts;
+  const [a, b, c] = parts;
   return (
     a === 0 || // "this" network
     a === 10 || // private
@@ -40,9 +40,11 @@ function isBlockedIPv4(address: string): boolean {
     (a === 172 && b >= 16 && b <= 31) || // private
     (a === 192 && b === 168) || // private
     (a === 100 && b >= 64 && b <= 127) || // CGNAT
-    (a === 192 && b === 0) || // IETF protocol assignments
-    a === 198 || // benchmarking / test nets
-    (a >= 224) // multicast + reserved + broadcast
+    (a === 192 && b === 0 && (c === 0 || c === 2)) || // protocol assignments, TEST-NET-1
+    (a === 198 && b >= 18 && b <= 19) || // benchmarking 198.18.0.0/15
+    (a === 198 && b === 51 && c === 100) || // TEST-NET-2
+    (a === 203 && b === 0 && c === 113) || // TEST-NET-3
+    a >= 224 // multicast + reserved + broadcast
   );
 }
 
@@ -104,14 +106,17 @@ function ipv6ToBytes(address: string): number[] | null {
 }
 
 /** Resolve a hostname to every address, refusing if any is blocked. */
-export async function assertHostResolvesPublic(hostname: string): Promise<void> {
+export async function assertHostResolvesPublic(
+  hostname: string,
+  isBlocked: (address: string) => boolean = isBlockedAddress,
+): Promise<void> {
   const bare = hostname.replace(/^\[|\]$/g, "");
 
   // IP literals (incl. the decimal/hex encodings a regex check misses:
   // Node normalizes 2130706433 and 0x7f000001 at connect time, so refuse
   // anything that is not a well-formed public IP or a resolvable name).
   if (net.isIP(bare)) {
-    if (isBlockedAddress(bare)) {
+    if (isBlocked(bare)) {
       throw new BlockedUrlError(`URL host ${hostname} is not allowed`);
     }
     return;
@@ -131,13 +136,23 @@ export async function assertHostResolvesPublic(hostname: string): Promise<void> 
     throw new BlockedUrlError(`could not resolve ${hostname}`);
   }
   for (const { address } of addresses) {
-    if (isBlockedAddress(address)) {
+    if (isBlocked(address)) {
       throw new BlockedUrlError(`URL host ${hostname} resolves to a blocked address`);
     }
   }
 }
 
 export class BlockedUrlError extends Error {}
+
+/** Surface a BlockedUrlError hidden in an error's cause chain. */
+export function unwrapBlocked(err: unknown): unknown {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current; depth++) {
+    if (current instanceof BlockedUrlError) return current;
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return err;
+}
 
 /**
  * Dispatcher whose DNS lookup re-validates at connect time. This is what
@@ -148,32 +163,40 @@ export class BlockedUrlError extends Error {}
  * uses its bundled copy of undici and silently ignores a dispatcher from
  * a separately installed one, which would leave this hook dead code.
  *
+ * The hook only fires for hostnames — undici connects straight to an IP
+ * literal without resolving, so those are covered by the pre-flight check
+ * in assertHostResolvesPublic. Rebinding needs a hostname anyway.
+ *
  * Note this dispatcher connects directly and ignores HTTP(S)_PROXY. That
  * is correct for Vercel, which has no egress proxy. If this is ever
  * deployed behind one, the proxy — not this process — would resolve the
  * target, so the address checks here would no longer bind and SSRF
  * filtering would have to move to the proxy.
  */
-const guardedAgent = new Agent({
-  connect: {
-    lookup(hostname, options, callback) {
-      dns.lookup(hostname, { ...options, all: true, verbatim: true }, (err, addresses) => {
-        if (err) {
-          callback(err, "", 0);
-          return;
-        }
-        const list = addresses as dns.LookupAddress[];
-        const blocked = list.find((a) => isBlockedAddress(a.address));
-        if (blocked) {
-          callback(new BlockedUrlError(`blocked address ${blocked.address}`), "", 0);
-          return;
-        }
-        // undici's lookup accepts the all:true array form.
-        callback(null, list as never);
-      });
+export function createGuardedAgent(isBlocked: (address: string) => boolean): Agent {
+  return new Agent({
+    connect: {
+      lookup(hostname, options, callback) {
+        dns.lookup(hostname, { ...options, all: true, verbatim: true }, (err, addresses) => {
+          if (err) {
+            callback(err, "", 0);
+            return;
+          }
+          const list = addresses as dns.LookupAddress[];
+          const blocked = list.find((a) => isBlocked(a.address));
+          if (blocked) {
+            callback(new BlockedUrlError(`blocked address ${blocked.address}`), "", 0);
+            return;
+          }
+          // undici's lookup accepts the all:true array form.
+          callback(null, list as never);
+        });
+      },
     },
-  },
-});
+  });
+}
+
+const guardedAgent = createGuardedAgent(isBlockedAddress);
 
 export interface SafeFetchResult {
   body: Buffer;
@@ -188,8 +211,25 @@ export interface SafeFetchResult {
  */
 export async function safeFetchImage(
   rawUrl: string,
-  opts: { maxBytes: number; allowedContentType: RegExp; timeoutMs?: number },
+  opts: {
+    maxBytes: number;
+    allowedContentType: RegExp;
+    timeoutMs?: number;
+    /**
+     * Test-only seam. Substitutes the address policy so the transport can
+     * be exercised end to end against a local server. Never pass this
+     * from application code — the defaults are the security boundary.
+     */
+    unsafeTestOverrides?: {
+      allowAddress: (address: string) => boolean;
+      dispatcher: Agent;
+    };
+  },
 ): Promise<SafeFetchResult> {
+  const addressAllowed = opts.unsafeTestOverrides
+    ? (address: string) => !opts.unsafeTestOverrides!.allowAddress(address)
+    : isBlockedAddress;
+  const dispatcher = opts.unsafeTestOverrides?.dispatcher ?? guardedAgent;
   let current: URL;
   try {
     current = new URL(rawUrl);
@@ -201,14 +241,22 @@ export async function safeFetchImage(
     if (current.protocol !== "https:" && current.protocol !== "http:") {
       throw new BlockedUrlError("only http(s) URLs are supported");
     }
-    await assertHostResolvesPublic(current.hostname);
+    await assertHostResolvesPublic(current.hostname, addressAllowed);
 
-    const res = await undiciFetch(current, {
-      redirect: "manual", // every hop is re-validated by this loop
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
-      headers: { "user-agent": "Wanderwall-Ingest/1.0 (+gallery image fetch)" },
-      dispatcher: guardedAgent,
-    });
+    let res;
+    try {
+      res = await undiciFetch(current, {
+        redirect: "manual", // every hop is re-validated by this loop
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
+        headers: { "user-agent": "Wanderwall-Ingest/1.0 (+gallery image fetch)" },
+        dispatcher: guardedAgent,
+      });
+    } catch (err) {
+      // undici wraps a connect-time refusal as `TypeError: fetch failed`
+      // with our error only in `.cause`. Unwrap it, or a blocked address
+      // looks like a transient network fault to every caller.
+      throw unwrapBlocked(err);
+    }
 
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("location");

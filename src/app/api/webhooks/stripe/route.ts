@@ -143,17 +143,14 @@ async function onCheckoutCompleted(session: Stripe.Checkout.Session) {
   } else if (kind === "hosting-monthly" || kind === "hosting-annual") {
     const tier = session.metadata?.tier === "L" ? "L" : "S";
     if (session.metadata?.includesCreation === "true") {
-      await db()
-        .insert(tables.purchases)
-        .values({
-          creatorId: creator.id,
-          galleryId,
-          kind: kind === "hosting-annual" ? "annual_bundle" : "creation",
-          stripeCheckoutSessionId: session.id,
-          amountCents: session.amount_total ?? 0,
-          currency: session.currency ?? "usd",
-        })
-        .onConflictDoNothing();
+      await recordCreationPurchase({
+        creatorId: creator.id,
+        galleryId,
+        galleryTitle: gallery.title,
+        creatorEmail: creator.email,
+        kind: kind === "hosting-annual" ? "annual_bundle" : "creation",
+        session,
+      });
     }
     // Hosting purchased: set tier; unfreeze / re-open editing. A gallery
     // upgrading from download loses its edit window (hosting has none).
@@ -184,6 +181,62 @@ async function onCheckoutCompleted(session: Stripe.Checkout.Session) {
       studioUrl: appUrl(`/studio/galleries/${gallery.id}`),
     },
   });
+}
+
+/**
+ * Record the one-time creation charge.
+ *
+ * The conflict target is deliberately the session id — plain
+ * onConflictDoNothing() would also swallow a violation of the
+ * one-creation-per-gallery index, which is the signal that a gallery was
+ * charged creation twice. A redelivery of the same session is idempotent;
+ * a genuinely second charge is caught, flagged for refund, and does not
+ * wedge the webhook in a retry loop.
+ */
+async function recordCreationPurchase(opts: {
+  creatorId: string;
+  galleryId: string;
+  galleryTitle: string;
+  creatorEmail: string;
+  kind: "creation" | "annual_bundle";
+  session: Stripe.Checkout.Session;
+}): Promise<void> {
+  try {
+    await db()
+      .insert(tables.purchases)
+      .values({
+        creatorId: opts.creatorId,
+        galleryId: opts.galleryId,
+        kind: opts.kind,
+        stripeCheckoutSessionId: opts.session.id,
+        amountCents: opts.session.amount_total ?? 0,
+        currency: opts.session.currency ?? "usd",
+      })
+      .onConflictDoNothing({ target: tables.purchases.stripeCheckoutSessionId });
+  } catch (err) {
+    const constraint = (err as { constraint?: string }).constraint;
+    if (constraint !== "purchases_one_creation_per_gallery_idx") throw err;
+
+    // The customer has been charged creation twice. Alert the operator
+    // rather than failing the webhook forever; the charge is real money
+    // and needs a human to refund it.
+    console.error(
+      `[billing] duplicate creation charge on gallery ${opts.galleryId} ` +
+        `(session ${opts.session.id}, ${opts.session.amount_total} ${opts.session.currency}) — refund required`,
+    );
+    await enqueueOnce(`dup-creation:${opts.session.id}`, QUEUES.sendEmail, {
+      to: env().OWNER_EMAIL,
+      subject: `Duplicate creation charge on "${opts.galleryTitle}" — refund required`,
+      template: "PurchaseReceiptEmail",
+      props: {
+        description:
+          `${opts.creatorEmail} was charged the creation fee twice for "${opts.galleryTitle}". ` +
+          `Stripe session ${opts.session.id} needs refunding.`,
+        amountCents: opts.session.amount_total ?? 0,
+        studioUrl: appUrl(`/studio/galleries/${opts.galleryId}`),
+      },
+    });
+  }
 }
 
 function subscriptionPeriodEnd(sub: Stripe.Subscription): Date | null {

@@ -1,5 +1,10 @@
 import http from "node:http";
-import { assertHostResolvesPublic, BlockedUrlError, safeFetchImage } from "@/lib/safe-fetch";
+import {
+  assertHostResolvesPublic,
+  BlockedUrlError,
+  createGuardedAgent,
+  safeFetchImage,
+} from "@/lib/safe-fetch";
 
 /**
  * SSRF assertions against a live server standing in for an attacker's
@@ -121,6 +126,49 @@ async function main() {
       reason = (err as Error).message;
     }
     record(`allows public host ${host}`, allowed, reason);
+  }
+
+  // 7. The transport itself must work end to end. This is the assertion
+  //    that would have caught the dispatcher being silently rejected —
+  //    every other "allows" check tests policy, not plumbing, so the whole
+  //    fetch path could be broken and they would all still pass. Loopback
+  //    is permitted here only, via an explicit test seam.
+  const permissive = { allowAddress: () => true };
+  const testAgent = createGuardedAgent(() => false);
+  try {
+    const ok = await safeFetchImage(`http://127.0.0.1:${port}/pic.png`, {
+      ...OPTS,
+      unsafeTestOverrides: { ...permissive, dispatcher: testAgent },
+    });
+    record(
+      "transport completes a real request",
+      ok.body.byteLength === 64 && ok.contentType.startsWith("image/png"),
+      `got ${ok.contentType} (${ok.body.byteLength} bytes)`,
+    );
+  } catch (err) {
+    record("transport completes a real request", false, (err as Error).message);
+  }
+
+  // 8. A connect-time refusal must surface as BlockedUrlError, not as the
+  //    TypeError undici wraps it in — otherwise the ingest job treats a
+  //    blocked address as transient and retries until the artwork is
+  //    permanently stuck with no reason shown.
+  //    Uses a hostname, not an IP literal: undici only consults the lookup
+  //    hook when it actually has to resolve something. IP literals never
+  //    reach it and are covered by the pre-flight check instead.
+  const rebindAgent = createGuardedAgent(() => true); // refuse at connect
+  try {
+    await safeFetchImage(`http://localhost:${port}/pic.png`, {
+      ...OPTS,
+      unsafeTestOverrides: { ...permissive, dispatcher: rebindAgent },
+    });
+    record("connect-time block surfaces as BlockedUrlError", false, "request was allowed");
+  } catch (err) {
+    record(
+      "connect-time block surfaces as BlockedUrlError",
+      err instanceof BlockedUrlError,
+      `got ${(err as Error).constructor.name}: ${(err as Error).message}`,
+    );
   }
 
   // A real public fetch too, when the environment permits outbound.

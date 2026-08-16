@@ -344,6 +344,8 @@ function wallRuns(room: LayoutRoom): WallRun[] {
 const MIN_GAP = 0.18;
 /** Below this a piece is too small to read; add a row instead of shrinking. */
 const COMFORTABLE_WIDTH = 0.75;
+/** Top of the strip used when a wall is already occupied at eye level. */
+const LOW_BAND_TOP = 0.95;
 
 function artworkSize(
   a: ArtworkView,
@@ -373,25 +375,42 @@ interface FreeSpan {
  * lets slots be evenly spaced — the previous approach nudged a piece off
  * a door and straight into its neighbour.
  */
-function freeSpans(run: WallRun, relaxed = false): FreeSpan[] {
+/** Remove [blockStart, blockEnd] from a set of spans. */
+function carve(spans: FreeSpan[], blockStart: number, blockEnd: number): FreeSpan[] {
+  const next: FreeSpan[] = [];
+  for (const span of spans) {
+    if (blockEnd <= span.start || blockStart >= span.end) {
+      next.push(span);
+      continue;
+    }
+    if (blockStart > span.start) next.push({ start: span.start, end: blockStart });
+    if (blockEnd < span.end) next.push({ start: blockEnd, end: span.end });
+  }
+  return next;
+}
+
+function freeSpans(
+  run: WallRun,
+  relaxed = false,
+  occupied: FreeSpan[] = [],
+): FreeSpan[] {
   const margin = relaxed ? 0.35 : WALL_MARGIN;
   const doorPad = relaxed ? 0.15 : 0.4;
   const minSpan = relaxed ? 0.3 : 0.5;
   const half = run.length / 2;
   let spans: FreeSpan[] = [{ start: -half + margin, end: half - margin }];
   for (const door of run.doors) {
-    const blockStart = door.offset - door.width / 2 - doorPad;
-    const blockEnd = door.offset + door.width / 2 + doorPad;
-    const next: FreeSpan[] = [];
-    for (const span of spans) {
-      if (blockEnd <= span.start || blockStart >= span.end) {
-        next.push(span);
-        continue;
-      }
-      if (blockStart > span.start) next.push({ start: span.start, end: blockStart });
-      if (blockEnd < span.end) next.push({ start: blockEnd, end: span.end });
-    }
-    spans = next;
+    spans = carve(
+      spans,
+      door.offset - door.width / 2 - doorPad,
+      door.offset + door.width / 2 + doorPad,
+    );
+  }
+  // Space already taken by a hero on this wall. Without this, a gallery
+  // with a hero on every wall hangs the remaining pieces straight through
+  // them.
+  for (const taken of occupied) {
+    spans = carve(spans, taken.start, taken.end);
   }
   return spans.filter((s) => s.end - s.start >= minSpan);
 }
@@ -453,6 +472,8 @@ function hangRoom(
   const rest = works.filter((w) => !w.hero);
   const heroWalls = new Set<WallSide>();
   const leftoverHeroes: ArtworkView[] = [];
+  /** Wall space consumed by heroes, so the remainder can hang around them. */
+  const heroOccupancy = new Map<WallSide, FreeSpan[]>();
   for (const hero of heroes) {
     const run =
       runs.find((r) => r.doors.length === 0 && !heroWalls.has(r.side)) ??
@@ -463,7 +484,7 @@ function hangRoom(
       continue;
     }
     const spans = freeSpans(run);
-    const widest = spans.sort((a, b) => b.end - b.start - (a.end - a.start))[0];
+    const widest = [...spans].sort((a, b) => b.end - b.start - (a.end - a.start))[0];
     if (!widest) {
       leftoverHeroes.push(hero);
       continue;
@@ -476,6 +497,9 @@ function hangRoom(
       room.ceiling - 1.0,
     );
     const centre = (widest.start + widest.end) / 2;
+    heroOccupancy.set(run.side, [
+      { start: centre - size.w / 2 - MIN_GAP, end: centre + size.w / 2 + MIN_GAP },
+    ]);
     placed.push(
       placeOnWall(
         room,
@@ -494,22 +518,33 @@ function hangRoom(
   const remaining = [...leftoverHeroes, ...rest];
   const available = runs.filter((r) => !heroWalls.has(r.side));
   const candidates = available.length > 0 ? available : runs;
+  /** Set when the remainder has to hang below whatever occupies the wall. */
+  let lowBand = false;
 
   // Only walls that actually have hangable space take a share. A short
   // wall whose span is entirely consumed by a doorway gets nothing — its
   // pieces move to the walls that can hold them rather than being dropped.
   let walls = candidates
-    .map((run) => ({ run, spans: freeSpans(run) }))
+    .map((run) => ({ run, spans: freeSpans(run, false, heroOccupancy.get(run.side) ?? []) }))
     .filter((w) => w.spans.length > 0);
   if (walls.length === 0) {
     walls = candidates
-      .map((run) => ({ run, spans: freeSpans(run, true) }))
+      .map((run) => ({ run, spans: freeSpans(run, true, heroOccupancy.get(run.side) ?? []) }))
       .filter((w) => w.spans.length > 0);
   }
-  if (walls.length === 0) {
-    // Every wall is doorway: hang along the room's longest wall anyway.
+  if (walls.length === 0 && remaining.length > 0) {
+    // Nothing is free at eye level. Rather than drop pieces or hang them
+    // through a hero, take the longest wall and use the band beneath
+    // whatever occupies it — vertically clear even where horizontally it
+    // is not.
     const widest = [...candidates].sort((a, b) => b.length - a.length)[0];
-    walls = [{ run: widest, spans: [{ start: -widest.length / 4, end: widest.length / 4 }] }];
+    walls = [
+      {
+        run: widest,
+        spans: [{ start: -widest.length / 2 + WALL_MARGIN, end: widest.length / 2 - WALL_MARGIN }],
+      },
+    ];
+    lowBand = true;
   }
 
   const counts = apportion(
@@ -527,8 +562,11 @@ function hangRoom(
     // stack than as a row of postage stamps. Row count is bounded by what
     // the ceiling can actually carry.
     const usable = spanLength(wall.spans);
-    const rowsByHeight = Math.max(1, Math.floor((room.ceiling - 0.8) / 1.15));
-    const maxRows = Math.min(salon ? 3 : 2, rowsByHeight);
+    // Row height shrinks as rows are added, so bound by a minimum band
+    // rather than a fixed piece height — an over-full wall should stack
+    // deeper instead of squeezing everything into two rows.
+    const rowsByHeight = Math.max(1, Math.floor((room.ceiling - 0.8) / 0.8));
+    const maxRows = Math.min(salon ? 4 : 3, rowsByHeight);
     let rows = 1;
     while (
       rows < maxRows &&
@@ -547,25 +585,37 @@ function hangRoom(
       rows = Math.ceil(group.length / perRow);
     }
 
-    const bandHeight = Math.min(1.35, (room.ceiling - 0.7) / rows);
-    const stackTop = Math.min(
-      room.ceiling - 0.35,
-      EYE_HEIGHT + (bandHeight * rows) / 2,
-    );
+    // In the low-band fallback the wall is already occupied at eye level,
+    // so the remainder sits in the strip beneath it.
+    const bandSpace = lowBand ? LOW_BAND_TOP - 0.15 : room.ceiling - 0.7;
+    const bandHeight = Math.min(1.35, Math.max(0.2, bandSpace / rows));
+
+    // The stack is positioned so its lowest row already clears the floor.
+    // Clamping each piece upward instead would push the bottom row into
+    // the row above it — a vertical overlap in place of a horizontal one.
+    const lowestTop = bandHeight * rows + 0.1;
+    const stackTop = lowBand
+      ? LOW_BAND_TOP
+      : Math.min(
+          Math.max(lowestTop, EYE_HEIGHT + (bandHeight * rows) / 2),
+          Math.max(lowestTop, room.ceiling - 0.35),
+        );
 
     group.forEach((work, j) => {
       const row = Math.floor(j / perRow);
       const slot = slots[j % perRow];
+      // The gap shrinks with the slot instead of being a fixed floor: a
+      // minimum width larger than the slot it sits in is how pieces end up
+      // overlapping on a wall that is genuinely over capacity.
+      const gap = Math.min(MIN_GAP, slot.width * 0.15);
       const size = artworkSize(
         work,
         false,
-        Math.max(0.15, slot.width - MIN_GAP),
-        bandHeight - 0.12,
+        Math.max(0.02, slot.width - gap),
+        bandHeight - 0.08,
       );
       const y =
-        rows === 1
-          ? EYE_HEIGHT
-          : Math.max(size.h / 2 + 0.3, stackTop - bandHeight * (row + 0.5));
+        rows === 1 && !lowBand ? EYE_HEIGHT : stackTop - bandHeight * (row + 0.5);
       placed.push(placeOnWall(room, wall.run.side, slot.offset, y, work, size));
     });
   });

@@ -52,7 +52,9 @@ export async function runImportChunkJob(data: ImportChunkJobData): Promise<void>
         : await listDropboxFolder(token, run.folderRef, run.cursor);
 
     const cap = pieceCapFor(gallery.tier as Tier);
-    let count = (await galleryArtworks(gallery.id)).length;
+    const existing = await galleryArtworks(gallery.id);
+    let count = existing.length;
+    let nextSortOrder = existing.reduce((max, a) => Math.max(max, a.sortOrder + 1), 0);
     let processed = run.processedFiles;
     let capped = false;
     const skipped: string[] = [];
@@ -72,7 +74,10 @@ export async function runImportChunkJob(data: ImportChunkJobData): Promise<void>
         .values({
           galleryId: gallery.id,
           title: file.name.replace(/\.[a-z0-9]+$/i, ""),
-          sortOrder: count,
+          // Advances per row claimed, not per successful download, so a
+          // file that fails to fetch does not leave two pieces sharing a
+          // position.
+          sortOrder: nextSortOrder++,
           sourceType: provider,
           sourceRef: file.id,
           ingestStatus: "pending",
