@@ -1,0 +1,48 @@
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { currentCreator } from "@/lib/auth";
+import { hasCreationPurchase } from "@/lib/billing";
+import { galleryByIdForCreator, galleryArtworks } from "@/lib/galleries";
+import {
+  createPlanCheckoutSession,
+  ensureStripeCustomer,
+  type HostingPlan,
+} from "@/lib/stripe";
+import { TIER_CAPS } from "@/lib/tiers";
+
+const checkoutSchema = z.object({
+  galleryId: z.string().uuid(),
+  plan: z.enum(["s-monthly", "s-annual", "l-monthly", "l-annual", "download"]),
+});
+
+export async function POST(request: Request) {
+  const creator = await currentCreator();
+  if (!creator) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  const body = checkoutSchema.safeParse(await request.json().catch(() => ({})));
+  if (!body.success) return NextResponse.json({ error: "invalid request" }, { status: 400 });
+
+  const gallery = await galleryByIdForCreator(body.data.galleryId, creator.id);
+  if (!gallery) return NextResponse.json({ error: "not found" }, { status: 404 });
+
+  // Guard: a plan must fit the gallery's piece count.
+  const plan = body.data.plan as HostingPlan;
+  const pieceCount = (await galleryArtworks(gallery.id)).length;
+  if ((plan === "s-monthly" || plan === "s-annual") && pieceCount > TIER_CAPS.S) {
+    return NextResponse.json(
+      { error: `this gallery has ${pieceCount} pieces — choose Tier L (up to ${TIER_CAPS.L})` },
+      { status: 400 },
+    );
+  }
+
+  const customerId = await ensureStripeCustomer(creator);
+  const waiveCreation = await hasCreationPurchase(gallery.id);
+  const session = await createPlanCheckoutSession({
+    plan,
+    galleryId: gallery.id,
+    customerId,
+    waiveCreation,
+  });
+
+  return NextResponse.json({ url: session.url });
+}

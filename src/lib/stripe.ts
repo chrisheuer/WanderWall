@@ -67,3 +67,139 @@ export async function createDonationSession(opts: {
 
   return stripe().checkout.sessions.create(params);
 }
+
+export type HostingPlan =
+  | "s-monthly" // creation one-time + $8/mo
+  | "s-annual" // $99/yr bundle, creation included
+  | "l-monthly" // creation one-time + $10/mo
+  | "l-annual" // $129/yr bundle, creation included
+  | "download"; // $29.99 one-time, 3-day edit window
+
+/** Ensure the creator has a Stripe customer; store the id. */
+export async function ensureStripeCustomer(creator: {
+  id: string;
+  email: string;
+  stripeCustomerId: string | null;
+}): Promise<string> {
+  if (creator.stripeCustomerId) return creator.stripeCustomerId;
+  const customer = await stripe().customers.create({
+    email: creator.email,
+    metadata: { creatorId: creator.id },
+  });
+  const { db, tables } = await import("@/db");
+  const { eq } = await import("drizzle-orm");
+  await db()
+    .update(tables.creators)
+    .set({ stripeCustomerId: customer.id })
+    .where(eq(tables.creators.id, creator.id));
+  return customer.id;
+}
+
+/**
+ * Hosting/creation/download Checkout. Promotion codes are enabled on every
+ * session; auto-renewal terms and the download edit window are stated in
+ * the session so nothing is buried.
+ */
+export async function createPlanCheckoutSession(opts: {
+  plan: HostingPlan;
+  galleryId: string;
+  customerId: string;
+  waiveCreation: boolean; // creation already purchased (e.g. tier change)
+}): Promise<Stripe.Checkout.Session> {
+  const e = env();
+  const successUrl = appUrl(`/studio/galleries/${opts.galleryId}?checkout=success`);
+  const cancelUrl = appUrl(`/studio/galleries/${opts.galleryId}/checkout`);
+
+  const base: Pick<
+    Stripe.Checkout.SessionCreateParams,
+    "allow_promotion_codes" | "customer" | "success_url" | "cancel_url"
+  > = {
+    allow_promotion_codes: true,
+    customer: opts.customerId,
+    success_url: successUrl,
+    cancel_url: cancelUrl,
+  };
+
+  if (opts.plan === "download") {
+    return stripe().checkout.sessions.create({
+      ...base,
+      mode: "payment",
+      line_items: [{ price: e.STRIPE_PRICE_DOWNLOAD, quantity: 1 }],
+      metadata: { kind: "download", galleryId: opts.galleryId },
+      custom_text: {
+        submit: {
+          message:
+            "One-time purchase. You can edit and re-export for 3 days after purchase; after that the gallery becomes read-only and your latest export stays downloadable forever.",
+        },
+      },
+    });
+  }
+
+  const monthly = opts.plan === "s-monthly" || opts.plan === "l-monthly";
+  const tierS = opts.plan.startsWith("s-");
+  const recurringPrice = monthly
+    ? tierS
+      ? e.STRIPE_PRICE_S_MONTHLY
+      : e.STRIPE_PRICE_L_MONTHLY
+    : tierS
+      ? e.STRIPE_PRICE_S_ANNUAL_BUNDLE
+      : e.STRIPE_PRICE_L_ANNUAL_BUNDLE;
+
+  const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
+    { price: recurringPrice, quantity: 1 },
+  ];
+  // Monthly plans pay the one-time creation fee alongside the first cycle;
+  // annual bundles include creation in year one.
+  if (monthly && !opts.waiveCreation) {
+    lineItems.push({ price: e.STRIPE_PRICE_CREATION, quantity: 1 });
+  }
+
+  return stripe().checkout.sessions.create({
+    ...base,
+    mode: "subscription",
+    line_items: lineItems,
+    subscription_data: {
+      metadata: { galleryId: opts.galleryId, tier: tierS ? "S" : "L" },
+    },
+    metadata: {
+      kind: monthly ? "hosting-monthly" : "hosting-annual",
+      galleryId: opts.galleryId,
+      tier: tierS ? "S" : "L",
+      includesCreation: String(!monthly || !opts.waiveCreation),
+    },
+    custom_text: {
+      submit: {
+        message: monthly
+          ? "Renews monthly until you cancel. Cancel any time with one click — your gallery stays live to the end of the period you've paid for, and you can always export it."
+          : "Renews yearly until you cancel. We'll email you 30 and 7 days before renewal. Cancel any time with one click — your gallery stays live to the end of the period you've paid for.",
+      },
+    },
+  });
+}
+
+/** One-click cancel and payment management: Stripe Customer Portal. */
+export async function createPortalSession(customerId: string, galleryId: string) {
+  return stripe().billingPortal.sessions.create({
+    customer: customerId,
+    return_url: appUrl(`/studio/galleries/${galleryId}`),
+  });
+}
+
+/**
+ * Crossing the 50-piece boundary: subscription update with proration —
+ * never a new creation fee.
+ */
+export async function upgradeSubscriptionTier(
+  stripeSubscriptionId: string,
+  interval: "month" | "year",
+): Promise<Stripe.Subscription> {
+  const e = env();
+  const sub = await stripe().subscriptions.retrieve(stripeSubscriptionId);
+  const item = sub.items.data[0];
+  const newPrice = interval === "month" ? e.STRIPE_PRICE_L_MONTHLY : e.STRIPE_PRICE_L_ANNUAL_BUNDLE;
+  return stripe().subscriptions.update(stripeSubscriptionId, {
+    items: [{ id: item.id, price: newPrice }],
+    proration_behavior: "create_prorations",
+    metadata: { ...sub.metadata, tier: "L" },
+  });
+}

@@ -3,11 +3,13 @@ import { notFound } from "next/navigation";
 import { asc, eq } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { requireCreator } from "@/lib/auth";
+import { hostingActive, latestSubscription } from "@/lib/billing";
 import {
   derivativeUrl,
   galleryArtworks,
   galleryByIdForCreator,
 } from "@/lib/galleries";
+import { BillingPanel } from "@/components/studio/BillingPanel";
 import { editWindowOpen } from "@/lib/tiers";
 import { UploadDropzone } from "@/components/studio/UploadDropzone";
 import { UrlImport } from "@/components/studio/UrlImport";
@@ -28,6 +30,10 @@ export default async function GalleryStudioPage(props: {
   if (!gallery) notFound();
 
   const artworks = await galleryArtworks(gallery.id);
+  const [isHosted, subscription] = await Promise.all([
+    hostingActive(gallery.id),
+    latestSubscription(gallery.id),
+  ]);
   const dbRooms = await db()
     .select()
     .from(tables.rooms)
@@ -80,6 +86,19 @@ export default async function GalleryStudioPage(props: {
       {gallery.tier === "download" && gallery.editWindowExpiresAt ? (
         <EditWindowCountdown expiresAt={gallery.editWindowExpiresAt.toISOString()} />
       ) : null}
+
+      <section style={{ marginTop: 32 }}>
+        <h2>Billing</h2>
+        <BillingPanel
+          galleryId={gallery.id}
+          tier={gallery.tier}
+          status={gallery.status}
+          hostingActive={isHosted}
+          pieceCount={artworks.length}
+          cancelAtPeriodEnd={subscription?.cancelAtPeriodEnd ?? false}
+          currentPeriodEnd={subscription?.currentPeriodEnd?.toISOString() ?? null}
+        />
+      </section>
 
       <section style={{ marginTop: 32 }}>
         <h2>Publish</h2>
