@@ -11,6 +11,7 @@ import {
 } from "@/lib/galleries";
 import { BillingPanel } from "@/components/studio/BillingPanel";
 import { CloudImportPanel } from "@/components/studio/CloudImportPanel";
+import { ExportPanel } from "@/components/studio/ExportPanel";
 import { isConnected } from "@/lib/cloud-imports";
 import { editWindowOpen } from "@/lib/tiers";
 import { UploadDropzone } from "@/components/studio/UploadDropzone";
@@ -150,6 +151,15 @@ export default async function GalleryStudioPage(props: {
             : "Reactivate hosting to edit."}
         </p>
       )}
+
+      <section style={{ marginTop: 32 }}>
+        <h2>Export</h2>
+        <ExportPanel
+          galleryId={gallery.id}
+          lastExportAt={gallery.lastExportAt?.toISOString() ?? null}
+          exportDonationUrl={gallery.exportDonationUrl}
+        />
+      </section>
 
       <section style={{ marginTop: 32 }}>
         <h2>Rooms</h2>
