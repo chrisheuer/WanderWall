@@ -1,6 +1,6 @@
 import dns from "node:dns";
 import net from "node:net";
-import { Agent, type Dispatcher } from "undici";
+import { Agent, fetch as undiciFetch, type Response as UndiciResponse } from "undici";
 
 /**
  * SSRF-hardened fetch for creator-supplied URLs.
@@ -47,22 +47,64 @@ function isBlockedIPv4(address: string): boolean {
 }
 
 function isBlockedIPv6(address: string): boolean {
-  const lower = address.toLowerCase().replace(/^\[|\]$/g, "");
-  // IPv4-mapped (::ffff:169.254.169.254) must be judged as its IPv4 form.
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-  if (mapped) return isBlockedIPv4(mapped[1]);
+  const bytes = ipv6ToBytes(address.toLowerCase().replace(/^\[|\]$/g, ""));
+  if (!bytes) return true; // unparseable: refuse
+
+  // IPv4-mapped and IPv4-compatible addresses must be judged as IPv4.
+  // WHATWG URL parsing rewrites ::ffff:169.254.169.254 into its hex form
+  // (::ffff:a9fe:a9fe), so matching on the dotted-quad spelling alone
+  // misses the very bypass this is here to stop.
+  const mappedPrefix = bytes.slice(0, 10).every((b) => b === 0);
+  if (mappedPrefix && bytes[10] === 0xff && bytes[11] === 0xff) {
+    return isBlockedIPv4(bytes.slice(12).join("."));
+  }
+  if (mappedPrefix && bytes[10] === 0 && bytes[11] === 0) {
+    return true; // :: and ::1 and IPv4-compatible legacy forms
+  }
+
+  const [b0, b1] = bytes;
   return (
-    lower === "::" ||
-    lower === "::1" || // loopback
-    lower.startsWith("fe80") || // link-local
-    lower.startsWith("fc") || // unique local
-    lower.startsWith("fd") || // unique local
-    lower.startsWith("ff") // multicast
+    b0 === 0xff || // multicast
+    (b0 === 0xfe && (b1 & 0xc0) === 0x80) || // link-local fe80::/10
+    (b0 & 0xfe) === 0xfc || // unique local fc00::/7
+    b0 === 0x00 // reserved / unspecified space
   );
 }
 
+/** Expand an IPv6 literal (including "::" and embedded IPv4) to 16 bytes. */
+function ipv6ToBytes(address: string): number[] | null {
+  let text = address;
+
+  // A trailing dotted-quad (::ffff:1.2.3.4) becomes two hex groups.
+  const embedded = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  if (embedded) {
+    const quad = embedded[1].split(".").map(Number);
+    if (quad.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    const hi = ((quad[0] << 8) | quad[1]).toString(16);
+    const lo = ((quad[2] << 8) | quad[3]).toString(16);
+    text = `${text.slice(0, embedded.index)}${hi}:${lo}`;
+  }
+
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string) =>
+    part === "" ? [] : part.split(":").map((g) => Number.parseInt(g, 16));
+
+  const head = parse(halves[0]);
+  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  if ([...head, ...tail].some((g) => !Number.isInteger(g) || g < 0 || g > 0xffff)) return null;
+
+  const groups =
+    halves.length === 2
+      ? [...head, ...Array(8 - head.length - tail.length).fill(0), ...tail]
+      : head;
+  if (groups.length !== 8) return null;
+
+  return groups.flatMap((g) => [(g >> 8) & 0xff, g & 0xff]);
+}
+
 /** Resolve a hostname to every address, refusing if any is blocked. */
-async function assertHostResolvesPublic(hostname: string): Promise<void> {
+export async function assertHostResolvesPublic(hostname: string): Promise<void> {
   const bare = hostname.replace(/^\[|\]$/g, "");
 
   // IP literals (incl. the decimal/hex encodings a regex check misses:
@@ -101,6 +143,16 @@ export class BlockedUrlError extends Error {}
  * Dispatcher whose DNS lookup re-validates at connect time. This is what
  * closes the rebinding window: the address the socket actually connects to
  * is the address that gets checked.
+ *
+ * It must be paired with undici's own `fetch` below — Node's global fetch
+ * uses its bundled copy of undici and silently ignores a dispatcher from
+ * a separately installed one, which would leave this hook dead code.
+ *
+ * Note this dispatcher connects directly and ignores HTTP(S)_PROXY. That
+ * is correct for Vercel, which has no egress proxy. If this is ever
+ * deployed behind one, the proxy — not this process — would resolve the
+ * target, so the address checks here would no longer bind and SSRF
+ * filtering would have to move to the proxy.
  */
 const guardedAgent = new Agent({
   connect: {
@@ -151,12 +203,12 @@ export async function safeFetchImage(
     }
     await assertHostResolvesPublic(current.hostname);
 
-    const res = await fetch(current, {
+    const res = await undiciFetch(current, {
       redirect: "manual", // every hop is re-validated by this loop
       signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
       headers: { "user-agent": "Wanderwall-Ingest/1.0 (+gallery image fetch)" },
       dispatcher: guardedAgent,
-    } as RequestInit & { dispatcher: Dispatcher });
+    });
 
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("location");
@@ -181,7 +233,7 @@ export async function safeFetchImage(
   throw new BlockedUrlError("too many redirects");
 }
 
-async function readCapped(res: Response, maxBytes: number): Promise<Buffer> {
+async function readCapped(res: UndiciResponse, maxBytes: number): Promise<Buffer> {
   const declared = Number(res.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => {});

@@ -61,6 +61,11 @@ npm run check     # typecheck + layout geometry + ingest privacy
   derivatives carry no EXIF or GPS, that full EXIF is retained privately
   for the creator, and that derivative sizes and formats match the
   residency policy.
+- `scripts/check-safe-fetch.ts` runs the URL importer against a live
+  server standing in for an attacker's host: redirects into cloud
+  metadata and loopback, obfuscated IP literals, IPv4-mapped IPv6,
+  non-image content, and oversized streaming bodies must all be refused,
+  while genuine public hosts are allowed.
 
 ## Architecture notes
 
