@@ -8,3 +8,6 @@ out/
 next-env.d.ts
 .vercel
 .DS_Store
+
+# Scratch/probe files (never belong in the repo)
+zz-*
