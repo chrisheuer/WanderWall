@@ -82,12 +82,24 @@ export function BillingPanel({
             <button className="btn btn-secondary" disabled={busy} onClick={openPortal}>
               Manage billing / cancel (one click)
             </button>{" "}
-            {tier === "S" && pieceCount > TIER_CAPS.S ? (
+            {/* Offered as the cap approaches, not only past it: the piece
+                cap is enforced on add, so "already over" is a state a
+                Tier S gallery can never actually reach. */}
+            {tier === "S" && pieceCount >= TIER_CAPS.S - 5 ? (
               <button className="btn" disabled={busy} onClick={upgrade}>
                 Upgrade to Tier L (prorated)
               </button>
             ) : null}
           </p>
+          {tier === "S" && pieceCount >= TIER_CAPS.S - 5 ? (
+            <p className="muted small">
+              {pieceCount >= TIER_CAPS.S
+                ? `You're at the Tier S limit of ${TIER_CAPS.S} pieces.`
+                : `${TIER_CAPS.S - pieceCount} piece${TIER_CAPS.S - pieceCount === 1 ? "" : "s"} left on Tier S.`}{" "}
+              Tier L holds up to {TIER_CAPS.L}. Upgrading is prorated and never charges creation
+              again.
+            </p>
+          ) : null}
           <p className="muted small" style={{ marginBottom: 0 }}>
             Cancelling keeps the gallery live to the end of the paid period, then freezes it —
             exportable or reactivatable, never deleted.

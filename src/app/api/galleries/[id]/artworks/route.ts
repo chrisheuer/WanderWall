@@ -50,7 +50,15 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
     assertEditable(gallery);
     await assertWithinPieceCap(gallery, body.data.files.length);
   } catch (err) {
-    if (err instanceof EditLockedError || err instanceof PieceCapError) {
+    if (err instanceof PieceCapError) {
+      // 409 with needsTierUpgrade lets the Studio offer the prorated
+      // upgrade inline rather than leaving the creator stuck at the cap.
+      return NextResponse.json(
+        { error: err.message, needsTierUpgrade: err.upgradable },
+        { status: err.upgradable ? 409 : 403 },
+      );
+    }
+    if (err instanceof EditLockedError) {
       return NextResponse.json({ error: err.message }, { status: 403 });
     }
     throw err;

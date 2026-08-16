@@ -29,7 +29,7 @@ export default async function CheckoutPage(props: { params: Promise<{ id: string
           : `fits Tier S (up to ${TIER_CAPS.S})`}
         . Promotion codes can be entered at checkout.
       </p>
-      <PlanPicker galleryId={gallery.id} needsL={needsL} />
+      <PlanPicker galleryId={gallery.id} needsL={needsL} currentTier={gallery.tier} />
       <p className="muted small" style={{ marginTop: 24 }}>
         Plain terms: hosting renews until you cancel, and cancelling takes one click — no
         retention hoops. We email you 30 and 7 days before an annual renewal. If hosting ends,

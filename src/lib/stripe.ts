@@ -52,6 +52,9 @@ export async function createDonationSession(opts: {
       donorName: opts.donorName ?? "",
       donorMessage: opts.donorMessage ?? "",
     },
+    // Promotion codes are enabled on every Checkout session, donations
+    // included — a supporter with a code should be able to use it.
+    allow_promotion_codes: true,
     success_url: appUrl(`/g/${opts.gallerySlug}?donated=1`),
     cancel_url: appUrl(`/g/${opts.gallerySlug}`),
     submit_type: "donate",
@@ -175,6 +178,17 @@ export async function createPlanCheckoutSession(opts: {
       },
     },
   });
+}
+
+/** Look up a Checkout session, tolerating one that Stripe has expired. */
+export async function retrieveCheckoutSession(
+  sessionId: string,
+): Promise<Stripe.Checkout.Session | null> {
+  try {
+    return await stripe().checkout.sessions.retrieve(sessionId);
+  } catch {
+    return null;
+  }
 }
 
 /** One-click cancel and payment management: Stripe Customer Portal. */

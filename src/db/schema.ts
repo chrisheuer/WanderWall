@@ -1,8 +1,8 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
   integer,
   jsonb,
-  numeric,
   pgEnum,
   pgTable,
   real,
@@ -145,6 +145,13 @@ export const galleries = pgTable(
     exportDonationUrl: text("export_donation_url"),
     lastExportKey: text("last_export_key"),
     lastExportAt: timestamp("last_export_at", { withTimezone: true }),
+    // The open Checkout session for this gallery, if any. Reused rather
+    // than creating a second session, so two tabs cannot both charge the
+    // one-time creation fee.
+    pendingCheckoutSessionId: text("pending_checkout_session_id"),
+    pendingCheckoutExpiresAt: timestamp("pending_checkout_expires_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -226,6 +233,12 @@ export const artworks = pgTable(
   (t) => [
     index("artworks_gallery_idx").on(t.galleryId),
     index("artworks_room_idx").on(t.roomId),
+    // Cloud imports are at-least-once: a redelivered chunk must not
+    // re-import files it already added. Uploads carry no source_ref and
+    // are unaffected.
+    uniqueIndex("artworks_gallery_source_ref_idx")
+      .on(t.galleryId, t.sourceRef)
+      .where(sql`${t.sourceRef} is not null`),
   ],
 );
 
@@ -233,22 +246,54 @@ export const artworks = pgTable(
 // Commerce — Stripe-mirrored, webhook-driven
 // ---------------------------------------------------------------------------
 
-export const purchases = pgTable("purchases", {
+export const purchases = pgTable(
+  "purchases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    creatorId: uuid("creator_id")
+      .notNull()
+      .references(() => creators.id),
+    galleryId: uuid("gallery_id").references(() => galleries.id, {
+      onDelete: "set null",
+    }),
+    kind: purchaseKindEnum("kind").notNull(),
+    stripeCheckoutSessionId: text("stripe_checkout_session_id").unique(),
+    stripePaymentIntentId: text("stripe_payment_intent_id"),
+    amountCents: integer("amount_cents").notNull(),
+    currency: text("currency").notNull().default("usd"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    // A gallery is only ever created once. If a second creation charge
+    // somehow lands, this refuses the row so it surfaces as a webhook
+    // error to refund rather than passing silently.
+    uniqueIndex("purchases_one_creation_per_gallery_idx")
+      .on(t.galleryId)
+      .where(sql`${t.kind} in ('creation', 'annual_bundle')`),
+  ],
+);
+
+/**
+ * Durable dedup for outbound notifications. pg-boss singleton keys only
+ * dedup while a job is queued, so a redelivered webhook or a re-run sweep
+ * would otherwise email the creator twice.
+ */
+/**
+ * Fixed-window rate limiting shared across instances. An in-memory Map
+ * gives each serverless instance its own budget, which is not a limit.
+ */
+export const rateLimits = pgTable("rate_limits", {
+  key: text("key").primaryKey(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull().defaultNow(),
+  count: integer("count").notNull().default(0),
+});
+
+export const notificationLog = pgTable("notification_log", {
   id: uuid("id").primaryKey().defaultRandom(),
-  creatorId: uuid("creator_id")
-    .notNull()
-    .references(() => creators.id),
-  galleryId: uuid("gallery_id").references(() => galleries.id, {
-    onDelete: "set null",
-  }),
-  kind: purchaseKindEnum("kind").notNull(),
-  stripeCheckoutSessionId: text("stripe_checkout_session_id").unique(),
-  stripePaymentIntentId: text("stripe_payment_intent_id"),
-  amountCents: integer("amount_cents").notNull(),
-  currency: text("currency").notNull().default("usd"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
+  dedupeKey: text("dedupe_key").notNull().unique(),
+  sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const subscriptions = pgTable("subscriptions", {

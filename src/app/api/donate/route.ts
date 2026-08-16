@@ -12,7 +12,7 @@ const donateSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const limited = rateLimit(`donate:${clientIp(request)}`, { limit: 10, windowMs: 60_000 });
+  const limited = await rateLimit(`donate:${clientIp(request)}`, { limit: 10, windowMs: 60_000 });
   if (!limited.ok) {
     return NextResponse.json(
       { error: "too many attempts; try again shortly" },

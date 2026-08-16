@@ -2,7 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { env } from "@/lib/env";
 import { storage } from "@/lib/storage";
-import { editWindowOpen, pieceCapFor } from "@/lib/tiers";
+import { editWindowOpen, pieceCapFor, TIER_CAPS } from "@/lib/tiers";
 
 export type Gallery = typeof tables.galleries.$inferSelect;
 export type Artwork = typeof tables.artworks.$inferSelect;
@@ -78,17 +78,32 @@ export async function assertWithinPieceCap(gallery: Gallery, adding = 0): Promis
   const count = works.length + adding;
   const cap = pieceCapFor(gallery.tier);
   if (count > cap) {
+    // Tier S outgrowing its cap is a normal, resolvable situation — it
+    // means "upgrade", not "no". Flagging it distinctly is what lets the
+    // caller offer the prorated upgrade instead of dead-ending the
+    // creator at a wall with nothing to click.
+    const upgradable = gallery.tier === "S" && count <= TIER_CAPS.L;
     throw new PieceCapError(
-      `This gallery's ${gallery.tier} tier holds up to ${cap} pieces (you would have ${count}). ` +
-        (gallery.tier === "S"
-          ? "Upgrade to Tier L to hang up to 120."
-          : "120 pieces is the maximum gallery size."),
+      upgradable
+        ? `Tier S holds up to ${cap} pieces and this would make ${count}. ` +
+          `Upgrading to Tier L (up to ${TIER_CAPS.L}) is prorated — you never pay the creation fee twice.`
+        : `This gallery holds up to ${cap} pieces (you would have ${count}). ` +
+          `${TIER_CAPS.L} pieces is the maximum gallery size.`,
+      upgradable,
     );
   }
   return count;
 }
 
-export class PieceCapError extends Error {}
+export class PieceCapError extends Error {
+  /** True when a prorated Tier L upgrade would resolve this. */
+  readonly upgradable: boolean;
+
+  constructor(message: string, upgradable = false) {
+    super(message);
+    this.upgradable = upgradable;
+  }
+}
 
 /** Public URL for a derivative key (public bucket, immutable cache). */
 export function derivativeUrl(key: string | undefined): string | null {

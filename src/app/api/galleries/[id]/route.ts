@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db, tables } from "@/db";
 import { currentCreator } from "@/lib/auth";
+import { hostingActive } from "@/lib/billing";
 import {
   EditLockedError,
   PieceCapError,
@@ -82,6 +83,20 @@ export async function DELETE(_request: Request, ctx: { params: Promise<{ id: str
     return NextResponse.json(
       { error: "only draft galleries can be deleted" },
       { status: 403 },
+    );
+  }
+
+  // A gallery can be draft *and* still carry live hosting (unpublishing
+  // does not cancel the subscription). Deleting it would orphan the
+  // subscription: Stripe keeps charging, and every later webhook no-ops
+  // because the gallery row is gone. Require the cancel first.
+  if (await hostingActive(gallery.id)) {
+    return NextResponse.json(
+      {
+        error:
+          "this gallery still has active hosting — cancel it in the billing portal first, so you stop being charged",
+      },
+      { status: 409 },
     );
   }
 

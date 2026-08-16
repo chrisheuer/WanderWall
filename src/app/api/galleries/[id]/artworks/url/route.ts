@@ -22,7 +22,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   const creator = await currentCreator();
   if (!creator) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const limited = rateLimit(`url-fetch:${clientIp(request)}:${creator.id}`, {
+  const limited = await rateLimit(`url-fetch:${clientIp(request)}:${creator.id}`, {
     limit: 30,
     windowMs: 60_000,
   });
@@ -46,7 +46,13 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
     assertEditable(gallery);
     await assertWithinPieceCap(gallery, body.data.urls.length);
   } catch (err) {
-    if (err instanceof EditLockedError || err instanceof PieceCapError) {
+    if (err instanceof PieceCapError) {
+      return NextResponse.json(
+        { error: err.message, needsTierUpgrade: err.upgradable },
+        { status: err.upgradable ? 409 : 403 },
+      );
+    }
+    if (err instanceof EditLockedError) {
       return NextResponse.json({ error: err.message }, { status: 403 });
     }
     throw err;

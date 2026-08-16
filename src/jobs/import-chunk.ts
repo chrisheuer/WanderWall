@@ -55,12 +55,18 @@ export async function runImportChunkJob(data: ImportChunkJobData): Promise<void>
     let count = (await galleryArtworks(gallery.id)).length;
     let processed = run.processedFiles;
     let capped = false;
+    const skipped: string[] = [];
 
     for (const file of page.files) {
       if (count >= cap) {
         capped = true;
         break;
       }
+
+      // Claim the file first. The unique (gallery_id, source_ref) index
+      // makes this the dedup point: a redelivered chunk — pg-boss is
+      // at-least-once — returns no row here and skips the file instead of
+      // importing it a second time.
       const [artwork] = await db()
         .insert(tables.artworks)
         .values({
@@ -71,45 +77,82 @@ export async function runImportChunkJob(data: ImportChunkJobData): Promise<void>
           sourceRef: file.id,
           ingestStatus: "pending",
         })
+        .onConflictDoNothing()
         .returning();
+      if (!artwork) continue; // already imported
 
-      const bytes =
-        provider === "gdrive"
-          ? await downloadGdriveFile(token, file.id)
-          : await downloadDropboxFile(token, file.id);
+      // One unreadable file must not abort the run. Mark it failed, keep
+      // going, and let the creator see which files did not come across.
+      try {
+        const bytes =
+          provider === "gdrive"
+            ? await downloadGdriveFile(token, file.id)
+            : await downloadDropboxFile(token, file.id);
 
-      const key = `${gallery.id}/${artwork.id}/original`;
-      await storage().put(env().STORAGE_ORIGINALS_BUCKET, key, bytes);
-      await db()
-        .update(tables.artworks)
-        .set({ originalKey: key })
-        .where(eq(tables.artworks.id, artwork.id));
-      await enqueue(QUEUES.ingest, { artworkId: artwork.id });
-
-      count += 1;
+        const key = `${gallery.id}/${artwork.id}/original`;
+        await storage().put(env().STORAGE_ORIGINALS_BUCKET, key, bytes);
+        await db()
+          .update(tables.artworks)
+          .set({ originalKey: key })
+          .where(eq(tables.artworks.id, artwork.id));
+        await enqueue(QUEUES.ingest, { artworkId: artwork.id });
+        count += 1;
+      } catch (fileErr) {
+        skipped.push(file.name);
+        await db()
+          .update(tables.artworks)
+          .set({
+            ingestStatus: "failed",
+            ingestError: (fileErr instanceof Error ? fileErr.message : String(fileErr)).slice(
+              0,
+              500,
+            ),
+          })
+          .where(eq(tables.artworks.id, artwork.id));
+      }
       processed += 1;
     }
 
     const done = capped || !page.nextCursor;
+    const notes: string[] = [];
+    if (capped) notes.push(`stopped at the ${cap}-piece tier cap; remaining files were skipped`);
+    if (skipped.length > 0) notes.push(`could not import: ${skipped.slice(0, 10).join(", ")}`);
+
     await db()
       .update(tables.importRuns)
       .set({
         cursor: page.nextCursor,
         processedFiles: processed,
         status: done ? "done" : "running",
-        error: capped
-          ? `stopped at the ${cap}-piece tier cap; remaining files were not imported`
-          : null,
+        error: notes.length > 0 ? notes.join(" · ").slice(0, 500) : run.error,
         updatedAt: new Date(),
       })
       .where(eq(tables.importRuns.id, run.id));
 
     if (!done) {
-      await enqueue(QUEUES.importChunk, { importRunId: run.id });
+      // Keyed so a duplicate delivery cannot start a second chain walking
+      // the same cursor.
+      await enqueue(
+        QUEUES.importChunk,
+        { importRunId: run.id },
+        { singletonKey: `import:${run.id}:${page.nextCursor ?? "end"}` },
+      );
     }
   } catch (err) {
-    await failRun(run.id, err instanceof Error ? err.message : String(err));
-    throw err;
+    // Only listing/auth failures reach here now, and those are worth
+    // retrying: leave the run resumable from its saved cursor rather than
+    // marking it failed, which would make every retry a no-op.
+    const message = err instanceof Error ? err.message : String(err);
+    const permanent = /not connected|reconnect|401|403/i.test(message);
+    if (permanent) {
+      await failRun(run.id, message);
+      return;
+    }
+    await db()
+      .update(tables.importRuns)
+      .set({ error: message.slice(0, 500), updatedAt: new Date() })
+      .where(eq(tables.importRuns.id, run.id));
+    throw err; // pg-boss retries with backoff, resuming from run.cursor
   }
 }
 

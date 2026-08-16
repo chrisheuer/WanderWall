@@ -3,7 +3,8 @@ import { NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { db, tables } from "@/db";
 import { env } from "@/lib/env";
-import { enqueue, QUEUES } from "@/lib/queue";
+import { QUEUES } from "@/lib/queue";
+import { enqueueOnce } from "@/lib/notify";
 import { stripe, appUrl } from "@/lib/stripe";
 import { DOWNLOAD_EDIT_WINDOW_DAYS } from "@/lib/tiers";
 
@@ -69,6 +70,14 @@ async function onCheckoutCompleted(session: Stripe.Checkout.Session) {
   const galleryId = session.metadata?.galleryId;
   if (!kind || !galleryId) return;
 
+  // This session is spent; release the gallery's pending-checkout hold.
+  if (kind !== "donation") {
+    await db()
+      .update(tables.galleries)
+      .set({ pendingCheckoutSessionId: null, pendingCheckoutExpiresAt: null })
+      .where(eq(tables.galleries.id, galleryId));
+  }
+
   if (kind === "donation") {
     const found = await galleryWithCreator(galleryId);
     if (!found) return;
@@ -83,7 +92,7 @@ async function onCheckoutCompleted(session: Stripe.Checkout.Session) {
         donorMessage: session.metadata?.donorMessage || null,
       })
       .onConflictDoNothing();
-    await enqueue(QUEUES.sendEmail, {
+    await enqueueOnce(`donation-receipt:${session.id}`, QUEUES.sendEmail, {
       to: found.creator.email,
       subject: `New donation for "${found.gallery.title}"`,
       template: "DonationReceiptEmail",
@@ -114,10 +123,22 @@ async function onCheckoutCompleted(session: Stripe.Checkout.Session) {
         currency: session.currency ?? "usd",
       })
       .onConflictDoNothing();
-    const expires = new Date(Date.now() + DOWNLOAD_EDIT_WINDOW_DAYS * 24 * 3600 * 1000);
+    // Anchor the window to the purchase, not to when this webhook happened
+    // to be processed — a delayed redelivery would otherwise silently
+    // extend the 3 days past what was sold.
+    const purchasedAt = session.created ? session.created * 1000 : Date.now();
+    const expires = new Date(purchasedAt + DOWNLOAD_EDIT_WINDOW_DAYS * 24 * 3600 * 1000);
     await db()
       .update(tables.galleries)
-      .set({ tier: "download", editWindowExpiresAt: expires, updatedAt: new Date() })
+      .set({
+        tier: "download",
+        // Never shorten a window already granted (e.g. two deliveries).
+        editWindowExpiresAt:
+          gallery.editWindowExpiresAt && gallery.editWindowExpiresAt > expires
+            ? gallery.editWindowExpiresAt
+            : expires,
+        updatedAt: new Date(),
+      })
       .where(eq(tables.galleries.id, galleryId));
   } else if (kind === "hosting-monthly" || kind === "hosting-annual") {
     const tier = session.metadata?.tier === "L" ? "L" : "S";
@@ -150,7 +171,7 @@ async function onCheckoutCompleted(session: Stripe.Checkout.Session) {
       .where(eq(tables.galleries.id, galleryId));
   }
 
-  await enqueue(QUEUES.sendEmail, {
+  await enqueueOnce(`purchase-receipt:${session.id}`, QUEUES.sendEmail, {
     to: creator.email,
     subject: "Your Wanderwall receipt",
     template: "PurchaseReceiptEmail",
@@ -237,12 +258,17 @@ async function onSubscriptionDeleted(sub: Stripe.Subscription) {
 
   const found = await galleryWithCreator(galleryId);
   if (!found) return;
+
+  // Only a gallery that was actually live needs freezing (and a notice).
+  // A draft or download-tier gallery is already not public.
+  if (found.gallery.status !== "published" && found.gallery.status !== "unlisted") return;
+
   await db()
     .update(tables.galleries)
     .set({ status: "frozen", updatedAt: new Date() })
     .where(eq(tables.galleries.id, galleryId));
 
-  await enqueue(QUEUES.billingEmail, {
+  await enqueueOnce(`frozen:${sub.id}`, QUEUES.billingEmail, {
     kind: "frozen-notice",
     to: found.creator.email,
     galleryTitle: found.gallery.title,
@@ -250,12 +276,16 @@ async function onSubscriptionDeleted(sub: Stripe.Subscription) {
   });
 }
 
-/** Renewal reminders (30/7 days) — the daily sweep is the backstop. */
+/**
+ * Renewal reminders are an annual-plan courtesy: monthly subscribers do
+ * not want twelve "your gallery renews soon" emails a year, and the spec
+ * scopes reminders to annual renewals. The 30/7-day cadence itself comes
+ * from the daily sweep, which can see exactly how far out the renewal is;
+ * this handler is the near-renewal safety net, deduped against the sweep
+ * by sharing its key space.
+ */
 async function onInvoiceUpcoming(invoice: Stripe.Invoice) {
-  const subId =
-    typeof (invoice as unknown as { subscription?: string }).subscription === "string"
-      ? (invoice as unknown as { subscription: string }).subscription
-      : null;
+  const subId = subscriptionIdOf(invoice);
   if (!subId) return;
   const [sub] = await db()
     .select()
@@ -263,32 +293,52 @@ async function onInvoiceUpcoming(invoice: Stripe.Invoice) {
     .where(eq(tables.subscriptions.stripeSubscriptionId, subId))
     .limit(1);
   if (!sub?.galleryId) return;
+  if (sub.interval !== "year") return; // monthly plans get no reminder
+  if (sub.cancelAtPeriodEnd) return; // nothing is going to renew
+
   const found = await galleryWithCreator(sub.galleryId);
   if (!found) return;
 
   const dueTs = invoice.next_payment_attempt ?? invoice.period_end;
   const renewsAt = dueTs ? new Date(dueTs * 1000) : null;
+  const periodKey = renewsAt ? renewsAt.toISOString().slice(0, 10) : String(invoice.period_end);
 
-  await enqueue(
-    QUEUES.billingEmail,
-    {
-      kind: "renewal-reminder",
-      to: found.creator.email,
-      galleryTitle: found.gallery.title,
-      renewsAt: renewsAt ? renewsAt.toISOString().slice(0, 10) : undefined,
-      amountCents: invoice.amount_due,
-      manageUrl: appUrl(`/studio/galleries/${found.gallery.id}`),
-    },
-    { singletonKey: `upcoming:${subId}:${invoice.period_end}` },
-  );
+  await enqueueOnce(`renewal:${subId}:${periodKey}:7`, QUEUES.billingEmail, {
+    kind: "renewal-reminder",
+    to: found.creator.email,
+    galleryTitle: found.gallery.title,
+    renewsAt: renewsAt ? renewsAt.toISOString().slice(0, 10) : undefined,
+    amountCents: invoice.amount_due,
+    manageUrl: appUrl(`/studio/galleries/${found.gallery.id}`),
+  });
+}
+
+/**
+ * `invoice.subscription` moved under `parent.subscription_details` in
+ * Stripe's basil API. Read both so a future API bump does not silently
+ * stop dunning and renewal notices.
+ */
+function subscriptionIdOf(invoice: Stripe.Invoice): string | null {
+  const legacy = (invoice as unknown as { subscription?: unknown }).subscription;
+  if (typeof legacy === "string") return legacy;
+  if (legacy && typeof legacy === "object" && "id" in legacy) {
+    return String((legacy as { id: unknown }).id);
+  }
+  const modern = (
+    invoice as unknown as {
+      parent?: { subscription_details?: { subscription?: unknown } };
+    }
+  ).parent?.subscription_details?.subscription;
+  if (typeof modern === "string") return modern;
+  if (modern && typeof modern === "object" && "id" in modern) {
+    return String((modern as { id: unknown }).id);
+  }
+  return null;
 }
 
 /** Failed renewals: Stripe smart retries run; we tell the creator plainly. */
 async function onPaymentFailed(invoice: Stripe.Invoice) {
-  const subId =
-    typeof (invoice as unknown as { subscription?: string }).subscription === "string"
-      ? (invoice as unknown as { subscription: string }).subscription
-      : null;
+  const subId = subscriptionIdOf(invoice);
   if (!subId) return;
   const [sub] = await db()
     .select()
@@ -299,14 +349,11 @@ async function onPaymentFailed(invoice: Stripe.Invoice) {
   const found = await galleryWithCreator(sub.galleryId);
   if (!found) return;
 
-  await enqueue(
-    QUEUES.billingEmail,
-    {
-      kind: "dunning",
-      to: found.creator.email,
-      galleryTitle: found.gallery.title,
-      manageUrl: appUrl(`/studio/galleries/${found.gallery.id}`),
-    },
-    { singletonKey: `dunning:${subId}:${invoice.id}` },
-  );
+  // One dunning notice per failed invoice, not one per smart retry.
+  await enqueueOnce(`dunning:${subId}:${invoice.id}`, QUEUES.billingEmail, {
+    kind: "dunning",
+    to: found.creator.email,
+    galleryTitle: found.gallery.title,
+    manageUrl: appUrl(`/studio/galleries/${found.gallery.id}`),
+  });
 }

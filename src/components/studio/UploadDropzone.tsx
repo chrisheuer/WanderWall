@@ -2,6 +2,9 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { supabaseBrowser } from "@/lib/supabase/client";
+
+const BUCKET = process.env.NEXT_PUBLIC_STORAGE_ORIGINALS_BUCKET ?? "originals";
 
 /**
  * Drag-drop upload (≤40MB/file). Registers files with the API, uploads
@@ -12,8 +15,31 @@ export function UploadDropzone({ galleryId }: { galleryId: string }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [needsUpgrade, setNeedsUpgrade] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  async function upgradeTier() {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/billing/upgrade-tier", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ galleryId }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof body.error === "string" ? body.error : "upgrade failed");
+      }
+      setNeedsUpgrade(false);
+      setError(null);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "upgrade failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const handleFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -43,21 +69,30 @@ export function UploadDropzone({ galleryId }: { galleryId: string }) {
           });
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
+            if (body.needsTierUpgrade) setNeedsUpgrade(true);
             throw new Error(
               typeof body.error === "string" ? body.error : `upload registration failed (${res.status})`,
             );
           }
           const { uploads } = (await res.json()) as {
-            uploads: Array<{ artworkId: string; uploadUrl: string }>;
+            uploads: Array<{ artworkId: string; uploadUrl: string; token: string; key: string }>;
           };
+          const supabase = supabaseBrowser();
           for (let j = 0; j < batch.length; j++) {
             setProgress(`Uploading ${i + j + 1} of ${list.length}…`);
-            const put = await fetch(uploads[j].uploadUrl, {
-              method: "PUT",
-              headers: { "content-type": batch[j].type },
-              body: batch[j],
-            });
-            if (!put.ok) throw new Error(`storage upload failed for ${batch[j].name}`);
+            // Use the SDK rather than hand-rolling the PUT: it sends the
+            // multipart body the endpoint expects and sets x-upsert, so
+            // retrying after a network blip that actually landed does not
+            // fail with a duplicate-object error.
+            const { error: uploadError } = await supabase.storage
+              .from(BUCKET)
+              .uploadToSignedUrl(uploads[j].key, uploads[j].token, batch[j], {
+                contentType: batch[j].type,
+                upsert: true,
+              });
+            if (uploadError) {
+              throw new Error(`upload failed for ${batch[j].name}: ${uploadError.message}`);
+            }
             await fetch(`/api/artworks/${uploads[j].artworkId}/complete`, { method: "POST" });
           }
         }
@@ -110,7 +145,18 @@ export function UploadDropzone({ galleryId }: { galleryId: string }) {
           onChange={(e) => e.target.files && void handleFiles(e.target.files)}
         />
       </div>
-      {error ? <p className="notice" style={{ marginTop: 12 }}>{error}</p> : null}
+      {error ? (
+        <div className="notice" style={{ marginTop: 12 }}>
+          <p style={{ margin: 0 }}>{error}</p>
+          {needsUpgrade ? (
+            <p style={{ margin: "10px 0 0" }}>
+              <button className="btn" disabled={busy} onClick={upgradeTier}>
+                {busy ? "Upgrading…" : "Upgrade to Tier L (prorated)"}
+              </button>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

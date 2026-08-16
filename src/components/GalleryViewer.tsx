@@ -99,6 +99,11 @@ export function GalleryViewer({
    * 120-piece gallery inside the mobile texture budget — rendering every
    * room would load every piece on first paint.
    */
+  const roomNames = useMemo(
+    () => new Map(layout.rooms.map((r) => [r.index, r.chapterLabel ?? r.name])),
+    [layout],
+  );
+
   const residentRooms = useMemo(() => {
     const neighbors = adjacency.get(activeRoomIndex) ?? new Set<number>();
     return layout.rooms.filter(
@@ -152,7 +157,7 @@ export function GalleryViewer({
       >
         <Lighting rigId={activeRoom.lightingRig} outdoor={activeRoom.archetype.outdoor} />
         {residentRooms.map((room) => (
-          <RoomMesh key={room.index} room={room} />
+          <RoomMesh key={room.index} room={room} roomNames={roomNames} />
         ))}
         <InstancedFrames rooms={residentRooms} />
         {residentRooms.map((room) =>

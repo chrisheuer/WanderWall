@@ -1,11 +1,14 @@
+import { eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { db, tables } from "@/db";
 import { currentCreator } from "@/lib/auth";
 import { hasCreationPurchase } from "@/lib/billing";
 import { galleryByIdForCreator, galleryArtworks } from "@/lib/galleries";
 import {
   createPlanCheckoutSession,
   ensureStripeCustomer,
+  retrieveCheckoutSession,
   type HostingPlan,
 } from "@/lib/stripe";
 import { TIER_CAPS } from "@/lib/tiers";
@@ -35,6 +38,23 @@ export async function POST(request: Request) {
     );
   }
 
+  /**
+   * Reuse an open session rather than minting a second one. Two tabs (or a
+   * double-click) would otherwise each compute "creation not yet paid" —
+   * the webhook that records the purchase has not fired for either — and
+   * both would charge the one-time creation fee.
+   */
+  if (
+    gallery.pendingCheckoutSessionId &&
+    gallery.pendingCheckoutExpiresAt &&
+    gallery.pendingCheckoutExpiresAt.getTime() > Date.now()
+  ) {
+    const existing = await retrieveCheckoutSession(gallery.pendingCheckoutSessionId);
+    if (existing?.status === "open" && existing.url) {
+      return NextResponse.json({ url: existing.url, reused: true });
+    }
+  }
+
   const customerId = await ensureStripeCustomer(creator);
   const waiveCreation = await hasCreationPurchase(gallery.id);
   const session = await createPlanCheckoutSession({
@@ -43,6 +63,16 @@ export async function POST(request: Request) {
     customerId,
     waiveCreation,
   });
+
+  await db()
+    .update(tables.galleries)
+    .set({
+      pendingCheckoutSessionId: session.id,
+      pendingCheckoutExpiresAt: session.expires_at
+        ? new Date(session.expires_at * 1000)
+        : new Date(Date.now() + 24 * 3600 * 1000),
+    })
+    .where(eq(tables.galleries.id, gallery.id));
 
   return NextResponse.json({ url: session.url });
 }

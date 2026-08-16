@@ -7,7 +7,15 @@ function usd(cents: number): string {
   return `$${(cents / 100).toFixed(2).replace(/\.00$/, "")}`;
 }
 
-export function PlanPicker({ galleryId, needsL }: { galleryId: string; needsL: boolean }) {
+export function PlanPicker({
+  galleryId,
+  needsL,
+  currentTier,
+}: {
+  galleryId: string;
+  needsL: boolean;
+  currentTier?: string;
+}) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,6 +71,13 @@ export function PlanPicker({ galleryId, needsL }: { galleryId: string; needsL: b
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
+      {currentTier === "download" ? (
+        <p className="notice">
+          You bought this gallery as a download. Moving to hosting is priced separately — a
+          monthly plan includes the one-time creation fee again, and an annual plan covers it in
+          the first year. Your existing download and its export stay yours either way.
+        </p>
+      ) : null}
       {tiers.map((t) => (
         <div className="card" key={t.key}>
           <h3 style={{ marginTop: 0 }}>{t.title}</h3>

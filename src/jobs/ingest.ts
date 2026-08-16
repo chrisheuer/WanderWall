@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import exifReader from "exif-reader";
 import sharp from "sharp";
 import { db, tables } from "@/db";
 import { env } from "@/lib/env";
@@ -40,22 +41,10 @@ export async function runIngestJob(data: IngestJobData): Promise<void> {
 
   try {
     const original = await storage().get(env().STORAGE_ORIGINALS_BUCKET, artwork.originalKey);
-    const image = sharp(original, { failOn: "truncated" });
-    const meta = await image.metadata();
-    if (!meta.width || !meta.height) throw new Error("unreadable image dimensions");
-
-    // Full EXIF retained privately (DB column only creators can read);
-    // derivatives below are re-encoded without any metadata, so GPS never
-    // reaches a served byte.
-    const exif = meta.exif ? parseExifSafe(original) : null;
+    const processed = await processImage(original);
 
     const derivativeKeys: Record<string, string> = {};
-    for (const [name, size] of Object.entries(DERIVATIVE_SIZES)) {
-      const buf = await sharp(original)
-        .rotate() // bake orientation, then drop metadata
-        .resize({ width: size, height: size, fit: "inside", withoutEnlargement: true })
-        .webp({ quality: name === "thumb" ? 78 : 84 })
-        .toBuffer();
+    for (const [name, buf] of Object.entries(processed.derivatives)) {
       const key = `${artwork.galleryId}/${artwork.id}/${name}.webp`;
       await storage().put(env().STORAGE_DERIVATIVES_BUCKET, key, buf, {
         contentType: "image/webp",
@@ -64,16 +53,14 @@ export async function runIngestJob(data: IngestJobData): Promise<void> {
       derivativeKeys[name] = key;
     }
 
-    const dominantColors = await extractDominantColors(original);
-
     await db()
       .update(tables.artworks)
       .set({
         derivativeKeys,
-        widthPx: meta.width,
-        heightPx: meta.height,
-        dominantColors,
-        exif,
+        widthPx: processed.width,
+        heightPx: processed.height,
+        dominantColors: processed.dominantColors,
+        exif: processed.exif,
         ingestStatus: "ready",
         ingestError: null,
       })
@@ -82,6 +69,43 @@ export async function runIngestJob(data: IngestJobData): Promise<void> {
     await markFailed(artworkId, err instanceof Error ? err.message : String(err));
     throw err; // let pg-boss retry with backoff
   }
+}
+
+export interface ProcessedImage {
+  derivatives: Record<string, Buffer>;
+  width: number;
+  height: number;
+  dominantColors: string[];
+  exif: Record<string, unknown> | null;
+}
+
+/**
+ * The whole image transform, free of storage and database so it can be
+ * exercised directly (see scripts/check-ingest.ts). Derivatives are
+ * re-encoded without a metadata directive, which is what guarantees no
+ * EXIF — and therefore no GPS — survives into anything we serve.
+ */
+export async function processImage(original: Buffer): Promise<ProcessedImage> {
+  const meta = await sharp(original, { failOn: "truncated" }).metadata();
+  if (!meta.width || !meta.height) throw new Error("unreadable image dimensions");
+
+  const derivatives: Record<string, Buffer> = {};
+  for (const [name, size] of Object.entries(DERIVATIVE_SIZES)) {
+    derivatives[name] = await sharp(original)
+      .rotate() // bake orientation, then drop metadata
+      .resize({ width: size, height: size, fit: "inside", withoutEnlargement: true })
+      .webp({ quality: name === "thumb" ? 78 : 84 })
+      .toBuffer();
+  }
+
+  return {
+    derivatives,
+    width: meta.width,
+    height: meta.height,
+    dominantColors: await extractDominantColors(original),
+    // Full EXIF retained privately for the creator.
+    exif: meta.exif ? parseExif(meta.exif) : null,
+  };
 }
 
 async function markFailed(artworkId: string, message: string): Promise<void> {
@@ -127,11 +151,23 @@ export async function extractDominantColors(input: Buffer): Promise<string[]> {
 }
 
 /**
- * Keep raw EXIF for the creator but never let GPS tags survive into
- * anything public. We store a JSON summary; the IFD GPS block is dropped.
+ * Parse the raw EXIF block into JSON for the creator's private record —
+ * camera, lens, exposure, and yes, GPS. This column is only ever read
+ * behind the creator's own auth; nothing here is serialized into a public
+ * page or an export.
  */
-function parseExifSafe(_original: Buffer): Record<string, unknown> | null {
-  // sharp exposes EXIF as a raw buffer; full IFD parsing is deferred.
-  // Derivatives are metadata-free regardless, so nothing sensitive is served.
-  return null;
+function parseExif(raw: Buffer): Record<string, unknown> | null {
+  try {
+    const parsed = exifReader(raw) as unknown as Record<string, unknown>;
+    // Dates arrive as Date objects; JSON columns need plain values.
+    return JSON.parse(
+      JSON.stringify(parsed, (_key, value) =>
+        value instanceof Date ? value.toISOString() : value,
+      ),
+    );
+  } catch {
+    // A malformed EXIF block is not a reason to fail an otherwise good
+    // image — the picture matters more than its metadata.
+    return null;
+  }
 }

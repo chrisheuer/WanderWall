@@ -8,6 +8,20 @@
       "when": 1786900583719,
       "tag": "0000_stiff_marten_broadcloak",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786904338842,
+      "tag": "0001_bitter_ultragirl",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786904784138,
+      "tag": "0002_noisy_dragon_lord",
+      "breakpoints": true
     }
   ]
 }

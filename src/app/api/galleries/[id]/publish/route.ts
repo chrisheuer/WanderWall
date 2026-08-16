@@ -66,7 +66,10 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
     await assertWithinPieceCap(gallery);
   } catch (err) {
     if (err instanceof PieceCapError) {
-      return NextResponse.json({ error: err.message }, { status: 403 });
+      return NextResponse.json(
+        { error: err.message, needsTierUpgrade: err.upgradable },
+        { status: err.upgradable ? 409 : 403 },
+      );
     }
     throw err;
   }

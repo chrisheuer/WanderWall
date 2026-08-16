@@ -15,7 +15,7 @@ const visitSchema = z.object({ gallerySlug: z.string().min(1).max(120) });
 
 export async function POST(request: Request) {
   const ip = clientIp(request);
-  const limited = rateLimit(`visits:${ip}`, { limit: 60, windowMs: 60_000 });
+  const limited = await rateLimit(`visits:${ip}`, { limit: 60, windowMs: 60_000 });
   if (!limited.ok) return NextResponse.json({ ok: false }, { status: 429 });
 
   const body = visitSchema.safeParse(await request.json().catch(() => ({})));

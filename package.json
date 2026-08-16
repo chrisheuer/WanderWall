@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && tsx scripts/check-layout.ts && tsx scripts/check-ingest.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "worker": "tsx src/worker/index.ts"

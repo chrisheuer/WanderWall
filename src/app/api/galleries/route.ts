@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db, tables } from "@/db";
 import { currentCreator } from "@/lib/auth";
+import { ensureEnvironmentsSeeded } from "@/lib/environments-seed";
 import { uniqueSlug } from "@/lib/slug";
 
 const createSchema = z.object({
@@ -18,6 +19,10 @@ export async function POST(request: Request) {
   if (!body.success) {
     return NextResponse.json({ error: body.error.flatten() }, { status: 400 });
   }
+
+  // environment_archetype is a foreign key, so a project whose seed script
+  // has not been run would fail here with an opaque constraint error.
+  await ensureEnvironmentsSeeded();
 
   const [gallery] = await db()
     .insert(tables.galleries)

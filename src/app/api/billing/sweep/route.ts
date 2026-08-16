@@ -2,7 +2,8 @@ import { and, eq, inArray, isNotNull, lt } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { db, tables } from "@/db";
 import { env } from "@/lib/env";
-import { enqueue, QUEUES } from "@/lib/queue";
+import { QUEUES } from "@/lib/queue";
+import { enqueueOnce } from "@/lib/notify";
 import { appUrl } from "@/lib/stripe";
 
 export const maxDuration = 60;
@@ -44,21 +45,26 @@ export async function GET(request: Request) {
   for (const row of annuals) {
     const end = row.sub.currentPeriodEnd!.getTime();
     const daysLeft = Math.floor((end - now) / 86_400_000);
+    const periodKey = row.sub.currentPeriodEnd!.toISOString().slice(0, 10);
+
+    // Windows, not exact-day equality: a cron that misses a day (or a
+    // rounding boundary that skips an integer) must not lose the notice
+    // permanently. The dedup log makes each window fire exactly once.
     for (const target of [30, 7]) {
-      if (daysLeft === target) {
-        await enqueue(
-          QUEUES.billingEmail,
-          {
-            kind: "renewal-reminder",
-            to: row.creator.email,
-            galleryTitle: row.gallery.title,
-            renewsAt: row.sub.currentPeriodEnd!.toISOString().slice(0, 10),
-            manageUrl: appUrl(`/studio/galleries/${row.gallery.id}`),
-          },
-          { singletonKey: `sweep:${row.sub.stripeSubscriptionId}:${end}:${target}` },
-        );
-        reminders += 1;
-      }
+      const inWindow = daysLeft <= target && daysLeft >= 0;
+      if (!inWindow) continue;
+      const sent = await enqueueOnce(
+        `renewal:${row.sub.stripeSubscriptionId}:${periodKey}:${target}`,
+        QUEUES.billingEmail,
+        {
+          kind: "renewal-reminder",
+          to: row.creator.email,
+          galleryTitle: row.gallery.title,
+          renewsAt: periodKey,
+          manageUrl: appUrl(`/studio/galleries/${row.gallery.id}`),
+        },
+      );
+      if (sent) reminders += 1;
     }
   }
 
@@ -82,16 +88,12 @@ export async function GET(request: Request) {
       .update(tables.galleries)
       .set({ status: "frozen", updatedAt: new Date() })
       .where(eq(tables.galleries.id, row.gallery.id));
-    await enqueue(
-      QUEUES.billingEmail,
-      {
-        kind: "frozen-notice",
-        to: row.creator.email,
-        galleryTitle: row.gallery.title,
-        manageUrl: appUrl(`/studio/galleries/${row.gallery.id}`),
-      },
-      { singletonKey: `frozen:${row.sub.stripeSubscriptionId}` },
-    );
+    await enqueueOnce(`frozen:${row.sub.id}`, QUEUES.billingEmail, {
+      kind: "frozen-notice",
+      to: row.creator.email,
+      galleryTitle: row.gallery.title,
+      manageUrl: appUrl(`/studio/galleries/${row.gallery.id}`),
+    });
     frozen += 1;
   }
 

@@ -96,7 +96,10 @@ export default async function PublicGalleryPage(props: Props) {
         artworks={artworks}
         creatorName={creatorName}
         initialFocusId={deepLink ?? null}
-        posterUrl={artworks[0]?.urls.wall ?? null}
+        // Thumb, not wall: the poster exists to paint something fast
+        // before the scene bundle arrives, so it must not be the heaviest
+        // image on the page.
+        posterUrl={artworks[0]?.urls.thumb ?? artworks[0]?.urls.wall ?? null}
       >
         <DonateButton gallerySlug={gallery.slug} galleryTitle={gallery.title} />
       </GalleryViewerLazy>

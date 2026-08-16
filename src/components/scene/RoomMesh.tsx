@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import type { LayoutRoom, WallSide } from "@/lib/layout";
 import { useSceneStore } from "./store";
@@ -22,8 +22,16 @@ const FLOOR_COLORS: Record<string, string> = {
   gravel: "#8b857a",
 };
 
-export function RoomMesh({ room }: { room: LayoutRoom }) {
+export function RoomMesh({
+  room,
+  roomNames,
+}: {
+  room: LayoutRoom;
+  /** Index -> name, so a lintel can announce where the door leads. */
+  roomNames?: Map<number, string>;
+}) {
   const requestTeleport = useSceneStore((s) => s.requestTeleport);
+  const destinationName = (index: number) => roomNames?.get(index) ?? "";
   const floorColor = FLOOR_COLORS[room.floorMaterial] ?? "#cdb48c";
   const [cx, cz] = room.center;
   const halfW = room.width / 2;
@@ -110,10 +118,10 @@ export function RoomMesh({ room }: { room: LayoutRoom }) {
                       <meshStandardMaterial color={room.wallColor} roughness={0.95} />
                     </mesh>
                   ) : null}
-                  {/* Wayfinding: room name on the lintel + doorway teleport */}
+                  {/* Wayfinding: the destination room's name over the door */}
                   <DoorLintelLabel
-                    label={`→`}
-                    position={[door.offset, door.height - 0.25, 0]}
+                    label={destinationName(door.toRoomIndex)}
+                    position={[door.offset, door.height + 0.22, 0.09]}
                   />
                   <mesh
                     position={[door.offset, door.height / 2, 0]}
@@ -142,6 +150,11 @@ export function RoomMesh({ room }: { room: LayoutRoom }) {
   );
 }
 
+/**
+ * Room name lettered onto the lintel. Drawn to a canvas texture rather
+ * than an SDF text mesh: one small texture per doorway costs far less
+ * than a glyph atlas, and the label never needs to animate.
+ */
 function DoorLintelLabel({
   label,
   position,
@@ -149,13 +162,34 @@ function DoorLintelLabel({
   label: string;
   position: [number, number, number];
 }) {
-  // Cheap glyph — full text labels live on the mini-map; the lintel arrow
-  // just signals "you can pass through here".
-  void label;
+  const texture = useMemo(() => {
+    if (!label || typeof document === "undefined") return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 128;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#4a463c";
+    ctx.font = "500 64px Georgia, 'Times New Roman', serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label.toUpperCase(), canvas.width / 2, canvas.height / 2, canvas.width - 24);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    return tex;
+  }, [label]);
+
+  useEffect(() => {
+    return () => texture?.dispose();
+  }, [texture]);
+
+  if (!texture) return null;
   return (
     <mesh position={position}>
-      <circleGeometry args={[0.06, 12]} />
-      <meshBasicMaterial color="#8a8a82" />
+      <planeGeometry args={[1.4, 0.35]} />
+      <meshBasicMaterial map={texture} transparent depthWrite={false} />
     </mesh>
   );
 }
