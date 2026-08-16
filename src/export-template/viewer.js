@@ -164,12 +164,32 @@ function startScene() {
     return bundle;
   }
 
+  /* Door-graph distance from the active room. Shells are kept two doors
+   * out because the rooms chain in a line with aligned doorways — you can
+   * see through the next room into the one beyond, and an unmounted shell
+   * there would read as a hole. Textures only go one door out. */
+  function hopsFrom(index) {
+    const distance = new Map([[index, 0]]);
+    let frontier = [index];
+    for (let depth = 1; depth <= 2 && frontier.length; depth++) {
+      const next = [];
+      for (const i of frontier) {
+        for (const n of adjacency.get(i) || []) {
+          if (distance.has(n)) continue;
+          distance.set(n, depth);
+          next.push(n);
+        }
+      }
+      frontier = next;
+    }
+    return distance;
+  }
+
   function updateResidency(index) {
-    const neighbors = adjacency.get(index) || new Set();
-    const resident = new Set([index, ...neighbors]);
+    const distance = hopsFrom(index);
 
     for (const [i, bundle] of roomBundles) {
-      if (!resident.has(i) && bundle.group.parent) {
+      if (!distance.has(i) && bundle.group.parent) {
         scene.remove(bundle.group);
         for (const art of bundle.arts) art.userData.releaseTexture();
       }
@@ -177,14 +197,19 @@ function startScene() {
 
     clickTargets = [];
     floorMeshes = [];
-    for (const i of resident) {
+    for (const [i, depth] of distance) {
       if (i == null || !layout.rooms[i]) continue;
       const bundle = bundleFor(i);
       if (!bundle.group.parent) scene.add(bundle.group);
-      // Active room gets wall-resolution art; neighbours pre-warm at thumb.
-      for (const art of bundle.arts) art.userData.loadTexture(i === index ? "wall" : "thumb");
-      clickTargets.push(...bundle.canvases);
-      floorMeshes.push(...bundle.floors);
+      if (depth <= 1) {
+        // Active room gets wall-resolution art; neighbours pre-warm at thumb.
+        for (const art of bundle.arts) art.userData.loadTexture(depth === 0 ? "wall" : "thumb");
+        clickTargets.push(...bundle.canvases);
+        floorMeshes.push(...bundle.floors);
+      } else {
+        // Visible shell only — release anything it was holding.
+        for (const art of bundle.arts) art.userData.releaseTexture();
+      }
     }
   }
 

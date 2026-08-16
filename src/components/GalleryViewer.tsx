@@ -100,25 +100,49 @@ export function GalleryViewer({
     return map;
   }, [layout]);
 
-  /**
-   * Residency is enforced by mounting, not just by texture choice: only
-   * the active room and the rooms reachable through its doors exist in the
-   * scene graph. Everything beyond is unmounted, which releases its
-   * texture pins and lets the LRU reclaim them. This is what keeps a
-   * 120-piece gallery inside the mobile texture budget — rendering every
-   * room would load every piece on first paint.
-   */
   const roomNames = useMemo(
     () => new Map(layout.rooms.map((r) => [r.index, r.chapterLabel ?? r.name])),
     [layout],
   );
 
-  const residentRooms = useMemo(() => {
-    const neighbors = adjacency.get(activeRoomIndex) ?? new Set<number>();
-    return layout.rooms.filter(
-      (room) => room.index === activeRoomIndex || neighbors.has(room.index),
-    );
-  }, [layout, adjacency, activeRoomIndex]);
+  /** Door-graph distance from the active room, for residency decisions. */
+  const hops = useMemo(() => {
+    const distance = new Map<number, number>([[activeRoomIndex, 0]]);
+    let frontier = [activeRoomIndex];
+    for (let depth = 1; depth <= 2 && frontier.length > 0; depth++) {
+      const next: number[] = [];
+      for (const index of frontier) {
+        for (const neighbor of adjacency.get(index) ?? []) {
+          if (distance.has(neighbor)) continue;
+          distance.set(neighbor, depth);
+          next.push(neighbor);
+        }
+      }
+      frontier = next;
+    }
+    return distance;
+  }, [adjacency, activeRoomIndex]);
+
+  /**
+   * Residency is enforced by mounting, not just by texture choice —
+   * rendering every room would load every piece on first paint and blow
+   * the mobile texture budget.
+   *
+   * Geometry reaches two doors out while artwork reaches one. Rooms chain
+   * in a line with their doorways aligned, so from one doorway you look
+   * straight through the next room into the one beyond; if that room's
+   * shell were unmounted you would be looking at a hole. Its walls are
+   * nearly free — its textures are not.
+   */
+  const shellRooms = useMemo(
+    () => layout.rooms.filter((room) => hops.has(room.index)),
+    [layout, hops],
+  );
+
+  const residentRooms = useMemo(
+    () => layout.rooms.filter((room) => (hops.get(room.index) ?? Infinity) <= 1),
+    [layout, hops],
+  );
 
   function residencyFor(placed: PlacedArtwork): Residency {
     if (focusedArtworkId === placed.artwork.id) return "focused";
@@ -165,7 +189,7 @@ export function GalleryViewer({
         shadows={false}
       >
         <Lighting rigId={activeRoom.lightingRig} outdoor={activeRoom.archetype.outdoor} />
-        {residentRooms.map((room) => (
+        {shellRooms.map((room) => (
           <RoomMesh key={room.index} room={room} roomNames={roomNames} />
         ))}
         <InstancedFrames rooms={residentRooms} />
