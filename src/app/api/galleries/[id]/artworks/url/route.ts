@@ -59,7 +59,11 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   }
 
   const created = [];
+  let skipped = 0;
   for (const url of body.data.urls) {
+    // A URL already in this gallery is skipped rather than added twice.
+    // The (gallery_id, source_ref) index would otherwise reject the insert
+    // outright, turning a re-paste or a double-submit into a 500.
     const [artwork] = await db()
       .insert(tables.artworks)
       .values({
@@ -69,10 +73,15 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
         sourceRef: url,
         ingestStatus: "pending",
       })
+      .onConflictDoNothing()
       .returning();
+    if (!artwork) {
+      skipped += 1;
+      continue;
+    }
     await enqueue(QUEUES.urlFetch, { artworkId: artwork.id, url });
     created.push(artwork.id);
   }
 
-  return NextResponse.json({ artworkIds: created }, { status: 201 });
+  return NextResponse.json({ artworkIds: created, skipped }, { status: 201 });
 }

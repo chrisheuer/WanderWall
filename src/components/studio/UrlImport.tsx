@@ -25,9 +25,14 @@ export function UrlImport({ galleryId }: { galleryId: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ urls: urls.slice(0, 20) }),
       });
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
         throw new Error(typeof body.error === "string" ? body.error : "URL import failed");
+      }
+      if (body.skipped > 0) {
+        setError(
+          `${body.skipped} URL${body.skipped === 1 ? " was" : "s were"} already in this gallery and ${body.skipped === 1 ? "was" : "were"} skipped.`,
+        );
       }
       setValue("");
       router.refresh();

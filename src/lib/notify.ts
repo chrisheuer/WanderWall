@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { enqueue, QUEUES } from "@/lib/queue";
 
@@ -21,6 +22,18 @@ export async function enqueueOnce(
     .returning({ id: tables.notificationLog.id });
 
   if (claimed.length === 0) return false; // already sent
-  await enqueue(queue, data);
+
+  try {
+    await enqueue(queue, data);
+  } catch (err) {
+    // Release the claim so a webhook redelivery or the next sweep can try
+    // again. Holding it would make the failure permanent — the caller
+    // would be told "already sent" forever for a mail that never went.
+    await db()
+      .delete(tables.notificationLog)
+      .where(eq(tables.notificationLog.id, claimed[0].id))
+      .catch(() => {});
+    throw err;
+  }
   return true;
 }
