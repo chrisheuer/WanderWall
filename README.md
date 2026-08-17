@@ -19,17 +19,73 @@ with them via static export.
 - **Resend** + React Email for all transactional email
 - **sharp** for derivatives (WebP thumb 256 / wall 1024 / zoom 2048)
 
-## Local development
+## Run it locally
+
+Auth, storage and the database are all Supabase, so you need one of the two
+setups below before you can sign in or upload photos. The public pages
+render without it; `/studio` redirects to `/setup`, which lists whatever is
+missing.
+
+### Option A — everything on your machine (recommended)
+
+Needs Docker and the [Supabase CLI](https://supabase.com/docs/guides/local-development).
+No cloud project, no real email.
 
 ```sh
-cp .env.example .env.local   # fill in Supabase/Stripe/Resend keys
 npm install
-npm run db:migrate           # apply drizzle/ migrations to DATABASE_URL
-npx tsx scripts/setup-storage.ts
-npx tsx scripts/seed.ts      # seed environment archetypes
-npm run dev                  # app on :3000
-npm run worker               # pg-boss worker (separate terminal)
+supabase start                 # prints API URL, anon key, service_role key
+cp .env.example .env.local     # paste those three values in
+npm run db:migrate
+npx tsx scripts/setup-storage.ts   # creates the three buckets
+npx tsx scripts/seed.ts            # seeds the 8 environment archetypes
+
+npm run dev                    # app on :3000
+npm run worker                 # REQUIRED — see below. separate terminal.
 ```
+
+Set `OWNER_EMAIL` in `.env.local` to the address you will sign in with:
+`SIGNUPS_ENABLED=false` means only that address gets an account.
+
+Sign-in emails don't leave your machine — the local stack catches them at
+[localhost:54324](http://localhost:54324). Open the newest message and click
+the link.
+
+### Option B — hosted Supabase, app local
+
+Create a free project at supabase.com, copy its URL, anon key and
+service_role key into `.env.local`, and set `DATABASE_URL` to the project's
+connection string. Then run the same migrate / setup-storage / seed / dev /
+worker commands. Magic-link emails go to your real inbox.
+
+For hosted Supabase, set the **Magic Link** email template to send a token
+hash, so a link opened on your phone works:
+
+```
+<a href="{{ .SiteURL }}/auth/callback?token_hash={{ .TokenHash }}&type=email">Sign in</a>
+```
+
+The default template uses a PKCE `code`, which only works in the browser that
+requested it. The callback accepts both, so same-device local testing works
+either way.
+
+### Two things that will bite you
+
+- **`npm run worker` must be running.** Uploads land in storage, then a
+  queued job makes the WebP derivatives. Without the worker your photos sit
+  at "processing" forever and never appear on a wall. In production a Vercel
+  cron drains the same queue; locally nothing does.
+- **You do not need Stripe to test uploading and walking a gallery.** Leave
+  a gallery as a draft and open its "Preview gallery" link — a draft is
+  visible to its creator at `/g/[slug]`. Only *publishing* is payment-gated,
+  so Stripe keys are only needed to exercise checkout.
+
+### What to expect
+
+Upload 3+ photos, then preview. Under ~14 pieces you get a single room;
+above that the gallery segments into chaptered rooms with corridors between
+wings. WASD or arrows to walk, drag to look, click a work to focus it, click
+the floor to move, and the mini-map bottom-right teleports. "List view"
+top-right is the 2D fallback and works without WebGL.
 
 In production the queue drains via a Vercel cron hitting
 `/api/queue/drain` (see `vercel.json`); the dedicated worker is optional.

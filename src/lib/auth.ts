@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db, tables } from "@/db";
 import { env } from "@/lib/env";
+import { supabaseConfigStatus } from "@/lib/supabase/config";
 import { supabaseServer } from "@/lib/supabase/server";
 
 export type Creator = typeof tables.creators.$inferSelect;
@@ -10,6 +11,10 @@ export type Creator = typeof tables.creators.$inferSelect;
  * sign-in. Returns null when unauthenticated.
  */
 export async function currentCreator(): Promise<Creator | null> {
+  // Unconfigured means nobody is signed in, not a crash. Middleware sends
+  // interactive routes to /setup; this keeps any other caller sane.
+  if (!supabaseConfigStatus().configured) return null;
+
   const supabase = await supabaseServer();
   const {
     data: { user },
