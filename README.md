@@ -19,6 +19,8 @@ with them via static export.
 - **Resend** + React Email for all transactional email
 - **sharp** for derivatives (WebP thumb 256 / wall 1024 / zoom 2048)
 
+See [DEPLOY.md](DEPLOY.md) for deploying to Vercel + Supabase.
+
 ## Run it locally
 
 Auth, storage and the database are all Supabase, so you need one of the two
