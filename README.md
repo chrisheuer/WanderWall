@@ -113,9 +113,12 @@ npm run check                          # typecheck + layout + ingest + SSRF
 DATABASE_URL=... npm run check:db      # schema constraints, against a scratch DB
 ```
 
-- `scripts/check-layout.ts` asserts across 768 archetype/density/count/hero
-  combinations that every piece is placed exactly once, no two canvases
-  overlap, and nothing hangs through a wall, floor, or ceiling.
+- `scripts/check-layout.ts` asserts across 1920 combinations of archetype,
+  density, piece count, hero count, and auto-segmented vs creator-defined
+  rooms that every piece is placed exactly once, that no two canvases
+  overlap (compared as rectangles, so a large piece cannot swallow a
+  smaller one hung beside it at a different height), that nothing is hung
+  across a doorway, and that nothing breaches a wall, floor, or ceiling.
 - `scripts/check-ingest.ts` asserts on real encoded bytes that served
   derivatives carry no EXIF or GPS, that full EXIF is retained privately
   for the creator, and that derivative sizes and formats match the
