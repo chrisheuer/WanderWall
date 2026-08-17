@@ -19,7 +19,7 @@ with them via static export.
 - **Resend** + React Email for all transactional email
 - **sharp** for derivatives (WebP thumb 256 / wall 1024 / zoom 2048)
 
-See [DEPLOY.md](DEPLOY.md) for deploying to Vercel + Supabase.
+See [docs/first-deploy.md](docs/first-deploy.md) to get it live, [docs/deploy-reference.md](docs/deploy-reference.md) for full deployment detail, and [docs/admin-runbook.md](docs/admin-runbook.md) for operating it.
 
 ## Run it locally
 
